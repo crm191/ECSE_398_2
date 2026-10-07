@@ -27,9 +27,11 @@ DXL_MOVING_STATUS_THRESHOLD = 20                # Dynamixel will rotate between 
 MAX_PROFILE_VELOCITY        = 50                # ranges from 0-32,767 [0.229 rev/min]
 WATCHDOG_TIME               = 3
 
+
 from dynamixel_sdk import *                    # Uses Dynamixel SDK library
 # from packet_handling import *
 import math
+import time
 """
 can keep track of current length and the initial length it started with
 """
@@ -150,25 +152,31 @@ class Dynamixel:
     def send_torque_cmd(self, torque):
         # Write current input --> in mA
         dxl_comm_result, dxl_error = self.packetHandler.write2ByteTxRx(self.portHandler, self.ID, ADDR_GOAL_CURRENT, torque)
-        # if dxl_comm_result != COMM_SUCCESS:
-        #     print("%s" % self.packetHandler.getTxRxResult(dxl_comm_result))
-        # elif dxl_error != 0:
-        #     print("%s" % self.packetHandler.getRxPacketError(dxl_error))
-        # else:
-        #     pass
+        if dxl_comm_result != COMM_SUCCESS:
+            print("%s" % self.packetHandler.getTxRxResult(dxl_comm_result))
+        elif dxl_error != 0:
+            print("%s" % self.packetHandler.getRxPacketError(dxl_error))
+        else:
+            pass
     
     def get_present_pos(self):
         # Read present position --> gives you steps/rev (360 deg = 4095)
         # dxl_present_position, dxl_comm_result, dxl_error = self.packetHandler.read4ByteTxRx(self.portHandler, self.ID, ADDR_PRESENT_POSITION)
         data, result, error = self.packetHandler.readTxRx(self.portHandler, self.ID, ADDR_PRESENT_POSITION, 4)
 
-        # Data Check
+        # Return None immediately on any failure — do not touch data
         if result != COMM_SUCCESS:
             print("%s" % self.packetHandler.getTxRxResult(result))
-        elif error != 0:
-             print("%s" % self.packetHandler.getRxPacketError(error))
-        else:
-             pass
+            return None
+
+        if error != 0:
+            print("%s" % self.packetHandler.getRxPacketError(error))
+            return None
+
+        if data is None or len(data) < 4:
+            print(f"[Motor {self.ID}] Incomplete data received: {data}")
+            return None
+
         
         data_read = DXL_MAKEDWORD(DXL_MAKEWORD(data[0], data[1]),
                                   DXL_MAKEWORD(data[2], data[3])) if (result == COMM_SUCCESS) else 0

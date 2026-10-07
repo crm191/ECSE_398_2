@@ -15,18 +15,20 @@ import math
 # KEYBOARD INPUTS
 ESC_ASCII_VALUE             = 0x1b
 SPACE_ASCII_VALUE           = 0x20
-WKEY_ASCII_VALUE            = 0x77
-SKEY_ASCII_VALUE            = 0x73
-AKEY_ASCII_VALUE            = 0x61
-DKEY_ASCII_VALUE            = 0x64
+WKEY_ASCII_VALUE            = 0x77      # +X - Motor 1
+SKEY_ASCII_VALUE            = 0x73      # -X - Motor 1
+AKEY_ASCII_VALUE            = 0x61      # +Y - Motor 2
+DKEY_ASCII_VALUE            = 0x64      # -Y - Motor 2
 CKEY_ASCII_VALUE            = 0x63
 BKEY_ASCII_VALUE            = 0x62      # key to bend the top module
 UKEY_ASCII_VALUE            = 0x75      # key to unbend the modules
 NKEY_ASCII_VALUE            = 0x6E
-IKEY_ASCII_VALUE            = 0x69     
+IKEY_ASCII_VALUE            = 0x69      # +Z - Motor 3
+KKEY_ASCII_VALUE            = 0x6B      # -Z - Motor 3
 PKEY_ASCII_VALUE            = 0x70   
 QKEY_ASCII_VALUE            = 0x71 
-TKEY_ASCII_VALUE            = 0x74     
+TKEY_ASCII_VALUE            = 0x74
+HKEY_ASCII_VALUE            = 0x68      # Home key     
 _1KEY_ASCII_VALUE            = 0x31 
 _2KEY_ASCII_VALUE            = 0x72 
 
