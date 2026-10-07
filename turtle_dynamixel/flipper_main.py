@@ -19,7 +19,6 @@ Controls:
     A / D   →  Motor 2 (Y)   positive / negative current
     I / K   →  Motor 3 (Z)   positive / negative current
     SPACE   →  Zero ALL currents (coast to stop)
-    H       →  Home  (position-control nudge back to centre, then resume)
     P       →  Print live positions + active currents
     Q / ESC →  Safe shutdown
 """
@@ -36,11 +35,10 @@ submodule = (
     + "/drl-turtle/ros2_ws/src/turtle_hardware/turtle_hardware/turtle_dynamixel"
 )
 sys.path.append(submodule)
-
 '''
 
-# ────── Path Setup - Windows ──────────────────────────────────────────────────────────────────
-#sys.path.append(r"C:\Users\charr\OneDrive - Case Western Reserve University\Documents\ECSE 398\venv\Lib\site-packages")
+# ────── Path Setup - Windows ──────────────────────────────────────────────────
+# sys.path.append(r"C:\Users\charr\OneDrive - Case Western Reserve University\Documents\ECSE 398\venv\Lib\site-packages")
 
 # ─── Platform-safe keyboard input ────────────────────────────────────────────
 if os.name == "nt":
@@ -97,43 +95,45 @@ MOTOR_ID_Z = 3      # Vertical pitch
 ALL_IDS = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
 # ── Position limits (steps, 4096 steps = 360°) ───────────────────────────────
-# Home is the electrical mid-point of the motor.
-# ±10° (1024 steps) either side keeps the flipper well clear of hard stops
-# and prevents adjacent motors from clashing.
-#HOME_STEPS      = 2048          # 180° — mechanical mid-point
-MAX_DELTA_STEPS = 114          # ±10° soft travel limit per axis
+# ±10° of travel per axis from startup position.
+# 114 steps ≈ 10°
+MAX_DELTA_STEPS = 114       # ±10° soft travel limit per axis
 
-#For static limits
-#LIMIT_MIN = HOME_STEPS - MAX_DELTA_STEPS    # 1024 steps
-#LIMIT_MAX = HOME_STEPS + MAX_DELTA_STEPS    # 3072 steps
-
-# When a motor is within this many steps of a soft limit, current is ramped
-# down linearly to zero so the motor coasts to a gentle stop.
-RAMP_ZONE = 200     # steps — width of the deceleration band near each limit
+# ⚠️  RAMP_ZONE must be LESS than MAX_DELTA_STEPS so the ramp has room to act.
+# With MAX_DELTA_STEPS=114, the furthest a motor can be from a limit is 114
+# steps (at home).  Setting RAMP_ZONE=200 would mean ramp_factor never
+# reaches 1.0 and full DRIVE_CURRENT is never applied.
+# Fixed: RAMP_ZONE reduced to 50 (≈ 4.4°), leaving a full-power band of 64
+# steps either side of home.
+RAMP_ZONE = 50              # steps — deceleration band near each soft limit
 
 # ── Current commands (mA) ─────────────────────────────────────────────────────
-# Dynamixel XM/XH series: 1 mA resolution on Goal Current register.
-# Keep well below the motor's rated stall current to protect the mechanism.
-DRIVE_CURRENT   = 150           # mA applied while a key is held
-HOLD_CURRENT    = 0             # mA when no key is pressed (coast / free)
+# Current Limit register max = 2,047 → 2047 × 2.69 mA = ~5,506 mA (5.5 A stall)
 
-# Absolute ceiling — hardware will never receive more than this value
-# regardless of any calculation.  Matches xw_max_torque in Constants.py.
-CURRENT_CEILING = 300           # mA
+# To send 150 mA:   150 / 2.69 ≈ 56 steps
+# To send 300 mA:   300 / 2.69 ≈ 112 steps
+# To send 500 mA:   500 / 2.69 ≈ 186 steps
+
+CURRENT_UNIT_MA     = 2.69          # mA per register step
+DRIVE_CURRENT_MA    = 150           # desired drive current in mA
+CEILING_CURRENT_MA  = 500           # desired ceiling in mA
+
+# Convert to register steps before sending
+DRIVE_CURRENT    = int(DRIVE_CURRENT_MA  / CURRENT_UNIT_MA)   # = 56 steps
+CURRENT_CEILING  = int(CEILING_CURRENT_MA / CURRENT_UNIT_MA)  # = 186 steps
+HOLD_CURRENT     = 0                 # 0 mA to coast when idle
 
 # ── Collision safety ──────────────────────────────────────────────────────────
-# The sum of per-axis deviations from home must stay below this threshold.
-# Prevents "corner" configurations where all three axes are simultaneously
-# near their extremes and the flipper plates could contact each other.
-COMBINED_DEV_LIMIT = int(1.5 * MAX_DELTA_STEPS)    # 1536 steps
+# Sum of per-axis deviations from home must stay below this threshold.
+COMBINED_DEV_LIMIT = int(1.5 * MAX_DELTA_STEPS)    # 171 steps
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-LOOP_HZ     = 20                # Control-loop rate
-LOOP_DT     = 1.0 / LOOP_HZ    # 50 ms per iteration
+LOOP_HZ = 20
+LOOP_DT = 1.0 / LOOP_HZ    # 50 ms per iteration
 
-# ── Home-nudge parameters (brief position-mode move to re-centre) ─────────────
-HOME_NUDGE_VEL      = 20        # Profile velocity during homing
-HOME_SETTLE_TIMEOUT = 5.0       # Seconds before homing gives up
+# ── Homing parameters ────────────────────────────────────────────────────────
+HOME_NUDGE_VEL      = 20    # Profile velocity used during homing
+HOME_SETTLE_TIMEOUT = 5.0   # Seconds before homing gives up
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
@@ -149,89 +149,96 @@ def steps_to_deg(steps: int) -> float:
     return round(steps * (360.0 / 4096.0), 2)
 
 
-def ramp_factor(pos: int, limits: dict) -> float:
+def ramp_factor(pos: int, motor_lims: dict) -> float:
     """
-    Returns a scalar in [0.0, 1.0] that smoothly reduces the commanded
-    current as the motor approaches either soft limit.
-
-    The factor is 1.0 (full current) in the safe interior and ramps
-    linearly to 0.0 at the limit boundary.
-
-         LIMIT_MIN          LIMIT_MAX
-             |  RAMP_ZONE  |           |  RAMP_ZONE  |
-             0 ──── ramp ──── 1.0 ──────── ramp ──── 0
-    """
-    # Distance from each soft limit
-    dist_lo = pos - limits['MIN']
-    dist_hi = limits['MAX'] - pos
-
-    nearest = min(dist_lo, dist_hi)        # distance to the closer limit
-
-    if nearest <= 0:
-        return 0.0                         # at or past the limit — zero current
-    if nearest >= RAMP_ZONE:
-        return 1.0                         # well inside safe zone — full current
-
-    return nearest / RAMP_ZONE            # linear ramp
-
-
-def safe_current(raw_mA: int, pos: int, limits: dict) -> int:
-    """
-    Scale raw_mA by the ramp factor at the current position, then clamp
-    to the hardware ceiling.  Sign is preserved so direction is maintained.
+    Returns a scalar in [0.0, 1.0] that smoothly reduces commanded current
+    as the motor approaches either soft limit.
 
     Parameters
     ----------
-    raw_mA : signed current command (mA) — may be positive or negative
-    pos    : current motor position in steps
-    limits : dictionary containing soft limits for each motor
+    pos        : current motor position in steps
+    motor_lims : per-motor limit dict  {'home': x, 'min': y, 'max': z}
 
-    Returns
-    -------
-    Signed, safety-clamped current in mA ready to send to send_torque_cmd().
+    Ramp profile:
+         min          min+RAMP_ZONE     max-RAMP_ZONE      max
+          |─── 0→1 ───|─────── 1.0 ──────────|─── 1→0 ───|
     """
-    factor  = ramp_factor(pos, limits)
+    # ✅ Correct lowercase keys from init_dynamic_limits()
+    dist_lo = pos - motor_lims['min']
+    dist_hi = motor_lims['max'] - pos
+
+    nearest = min(dist_lo, dist_hi)
+
+    if nearest <= 0:
+        return 0.0                  # at or past limit — zero current
+    if nearest >= RAMP_ZONE:
+        return 1.0                  # well inside safe zone — full current
+    return nearest / RAMP_ZONE     # linear ramp
+
+
+def safe_current(raw_mA: int, pos: int, motor_lims: dict) -> int:
+    """
+    Scale raw_mA by the ramp factor, then clamp to the hardware ceiling.
+    Sign is preserved so motor direction is maintained.
+
+    Parameters
+    ----------
+    raw_mA     : signed current command (mA)
+    pos        : current motor position in steps
+    motor_lims : per-motor limit dict  {'home': x, 'min': y, 'max': z}
+    """
+    factor  = ramp_factor(pos, motor_lims)      # ✅ per-motor sub-dict
     scaled  = int(raw_mA * factor)
     clamped = clamp(abs(scaled), 0, CURRENT_CEILING)
     return clamped if raw_mA >= 0 else -clamped
 
 
-def combined_deviation(positions: dict, limits: dict) -> int:
+def combined_deviation(positions: dict, all_limits: dict) -> int:
     """
-    Sum of absolute deviations from HOME across all three axes.
+    Sum of absolute deviations from each motor's home position.
     Used for the geometric collision check.
-    """
-    return sum(abs(positions[mid] - limits['HOME']) for mid in ALL_IDS)
-
-
-def collision_blocked(positions: dict, axis_id: int, direction: int, limits: dict) -> bool:
-    """
-    Returns True if driving motor `axis_id` in `direction` (+1 or -1)
-    would push the combined deviation over the safety threshold.
 
     Parameters
     ----------
-    positions : dict  { motor_id: current_steps }
-    axis_id   : which motor we want to move
-    direction : +1 (away from home on that axis) or -1 (toward home)
-    limits    : dictionary containing soft limits for each motor
+    positions  : { motor_id: steps }
+    all_limits : full limits dict  { motor_id: {'home':x,'min':y,'max':z} }
     """
-    # Estimate where the motor will be after one RAMP_ZONE worth of travel
+    # ✅ Access each motor's home from its own sub-dictionary
+    return sum(abs(positions[mid] - all_limits[mid]['home']) for mid in ALL_IDS)
+
+
+def collision_blocked(positions: dict, axis_id: int,
+                      direction: int, all_limits: dict) -> bool:
+    """
+    Returns True if driving motor `axis_id` in `direction` would push the
+    combined deviation over COMBINED_DEV_LIMIT.
+
+    Parameters
+    ----------
+    positions  : { motor_id: steps }
+    axis_id    : motor to move
+    direction  : +1 or -1
+    all_limits : full limits dict  { motor_id: {'home':x,'min':y,'max':z} }
+    """
     projected = dict(positions)
     projected[axis_id] += direction * RAMP_ZONE
-    return combined_deviation(projected, limits) > COMBINED_DEV_LIMIT
+    # ✅ Pass full all_limits dict so combined_deviation can look up each motor
+    return combined_deviation(projected, all_limits) > COMBINED_DEV_LIMIT
 
 
-def print_status(positions: dict, currents: dict, limits: dict) -> None:
+def print_status(positions: dict, currents: dict, all_limits: dict) -> None:
     """Pretty-print live motor state."""
     print("\n" + "─" * 65)
     print(f"  {'Motor':<10} {'Axis':<14} {'Steps':>7}  {'Angle':>9}  {'Current':>9}")
     print("─" * 65)
-    labels = {MOTOR_ID_X: "X (fwd/bk)",
-              MOTOR_ID_Y: "Y (lateral)",
-              MOTOR_ID_Z: "Z (vertical)"}
+    labels = {
+        MOTOR_ID_X: "X (fwd/bk)",
+        MOTOR_ID_Y: "Y (lateral)",
+        MOTOR_ID_Z: "Z (vertical)",
+    }
     for mid in ALL_IDS:
-        pos = positions.get(mid, limits['HOME'])
+        # ✅ Fall back to each motor's own home, not a shared 'HOME' key
+        pos = positions.get(mid, all_limits[mid]['home'])
         cur = currents.get(mid, 0)
         print(
             f"  ID {mid:<7} {labels[mid]:<14} {pos:>6}   "
@@ -241,11 +248,11 @@ def print_status(positions: dict, currents: dict, limits: dict) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  HARDWARE INITIALIZATION
+#  HARDWARE INITIALISATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def init_port():
-    """Open serial port.  Exits on failure."""
+    """Open serial port. Exits on failure."""
     port   = portHandlerJoint       # From Constants.py
     packet = packetHandlerJoint     # From Constants.py
 
@@ -289,20 +296,26 @@ def init_motors(port, packet) -> dict:
 
     return motors
 
-# Figure out if needed. Depends on home position
+
 def init_dynamic_limits(motors: dict) -> dict:
     """
-    Read each motor's actual startup position and build
-    soft limits centered around it.
+    Read each motor's actual startup position and build soft limits
+    centred around it.
+
+    Returns
+    -------
+    { motor_id: {'home': steps, 'min': steps, 'max': steps} }
     """
-    limits = {}
-    positions = read_all_positions(motors)
+    all_limits = {}
+    # ✅ Use fallback-safe read with zeros as initial last_positions
+    positions  = read_all_positions(motors, {mid: 0 for mid in ALL_IDS})
+
     for mid in ALL_IDS:
         home = positions[mid]
-        limits[mid] = {
-            "home"  : home,
-            "min"   : home - MAX_DELTA_STEPS,
-            "max"   : home + MAX_DELTA_STEPS,
+        all_limits[mid] = {
+            'home': home,
+            'min' : home - MAX_DELTA_STEPS,
+            'max' : home + MAX_DELTA_STEPS,
         }
         print(
             f"[LIMITS] Motor {mid} — "
@@ -310,7 +323,7 @@ def init_dynamic_limits(motors: dict) -> dict:
             f"Min: {steps_to_deg(home - MAX_DELTA_STEPS):.2f}°  "
             f"Max: {steps_to_deg(home + MAX_DELTA_STEPS):.2f}°"
         )
-    return limits
+    return all_limits
 
 
 def zero_all_currents(motors: dict, currents: dict) -> None:
@@ -320,21 +333,42 @@ def zero_all_currents(motors: dict, currents: dict) -> None:
         currents[mid] = 0
 
 
-def read_all_positions(motors: dict) -> dict:
-    """Read present position from every motor. Returns { id: steps }."""
-    return {mid: motor.get_present_pos() for mid, motor in motors.items()}
+def read_all_positions(motors: dict, last_positions: dict) -> dict:
+    """
+    Read present position from every motor.
+    Falls back to last known position if a read returns None (comms failure).
+
+    Parameters
+    ----------
+    motors         : { motor_id: Dynamixel }
+    last_positions : { motor_id: steps }  — used as fallback on read failure
+
+    Returns
+    -------
+    { motor_id: steps }
+    """
+    result = {}
+    for mid, motor in motors.items():
+        pos = motor.get_present_pos()
+        if pos is None:
+            # ✅ Gracefully fall back — do not crash on a bad read
+            result[mid] = last_positions.get(mid, 0)
+            print(f"[WARNING] Motor {mid} read failed — using last known position.")
+        else:
+            result[mid] = pos
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HOMING ROUTINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def home_all_motors(motors: dict, packet, port, limits: dict) -> dict:
+def home_all_motors(motors: dict, packet, port, all_limits: dict) -> dict:
     """
     Briefly switch to Extended Position Mode to drive all motors back to
-    HOME_STEPS, then return to Current Control Mode.
+    their individual home positions, then return to Current Control Mode.
 
-    Returns the refreshed positions dict (all ≈ HOME_STEPS).
+    Returns the refreshed positions dict.
     """
     print("\n[HOME] Switching to position mode for homing ...")
 
@@ -343,14 +377,19 @@ def home_all_motors(motors: dict, packet, port, limits: dict) -> dict:
         motor.extended_pos_mode()
         motor.set_max_velocity(HOME_NUDGE_VEL)
         motor.enable_torque()
-        motor.set_goal_position(limits['HOME'])
+        # ✅ Use each motor's own home position
+        motor.set_goal_position(all_limits[mid]['home'])
 
-    # Wait for all motors to settle
-    deadline = time.time() + HOME_SETTLE_TIMEOUT
+    # Wait for all motors to settle at their individual homes
+    deadline  = time.time() + HOME_SETTLE_TIMEOUT
+    positions = {mid: 0 for mid in ALL_IDS}
     while time.time() < deadline:
-        positions = read_all_positions(motors)
-        if all(abs(positions[mid] - limits['HOME']) <= DXL_MOVING_STATUS_THRESHOLD
-               for mid in ALL_IDS):
+        positions = read_all_positions(motors, positions)
+        # ✅ Check each motor against its own home
+        if all(
+            abs(positions[mid] - all_limits[mid]['home']) <= DXL_MOVING_STATUS_THRESHOLD
+            for mid in ALL_IDS
+        ):
             break
         time.sleep(LOOP_DT)
 
@@ -362,7 +401,7 @@ def home_all_motors(motors: dict, packet, port, limits: dict) -> dict:
         motor.enable_torque()
         motor.send_torque_cmd(HOLD_CURRENT)
 
-    positions = read_all_positions(motors)
+    positions = read_all_positions(motors, positions)
     print("[HOME] Done.\n")
     return positions
 
@@ -402,7 +441,6 @@ def main():
     A / D   →  Motor 2 (Y-axis)   Left     / Right
     I / K   →  Motor 3 (Z-axis)   Up       / Down
     SPACE   →  Zero all currents  (coast to stop)
-    H       →  Home all motors    (re-centre)
     P       →  Print live status
     Q / ESC →  Safe shutdown
     """)
@@ -410,17 +448,16 @@ def main():
     # ── 1. Hardware setup ─────────────────────────────────────────────────────
     port, packet = init_port()
     motors       = init_motors(port, packet)
+
+    # ── 2. Build dynamic limits from actual startup positions ─────────────────
     limits = init_dynamic_limits(motors)
 
-    # ── 2. State tracking ─────────────────────────────────────────────────────
-    # positions: last-known motor positions in steps
-    # currents : last commanded current per motor in mA
-    positions = read_all_positions(motors)
+    # ── 3. State tracking ─────────────────────────────────────────────────────
+    # ✅ Pass per-motor home as initial fallback for first read
+    positions = read_all_positions(motors, {mid: limits[mid]['home'] for mid in ALL_IDS})
     currents  = {mid: 0 for mid in ALL_IDS}
 
-    # Key → (motor_id, sign) mapping
-    # sign +1 means positive current (motor moves in + direction)
-    # sign -1 means negative current
+    # ── Key → (motor_id, direction, label) ───────────────────────────────────
     KEY_MAP = {
         chr(WKEY_ASCII_VALUE): (MOTOR_ID_X, +1, "X +"),
         chr(SKEY_ASCII_VALUE): (MOTOR_ID_X, -1, "X −"),
@@ -432,62 +469,54 @@ def main():
 
     print("[READY] Flipper live. Hold a key to apply current.\n")
 
-    # ── 3. Control loop ───────────────────────────────────────────────────────
+    # ── 4. Control loop ───────────────────────────────────────────────────────
     running         = True
-    active_key      = None      # key currently being held
+    active_key      = None
     last_print_time = 0.0
 
     while running:
         loop_start = time.time()
 
-        # ── 3a. Read fresh positions from all motors ──────────────────────────
-        positions = read_all_positions(motors)
+        # ── 4a. Read fresh positions — fall back to last known on failure ─────
+        positions = read_all_positions(motors, positions)   # ✅ pass last positions
 
-        # ── 3b. Check for a new keypress ──────────────────────────────────────
+        # ── 4b. Keypress handling ─────────────────────────────────────────────
         if kbhit():
             key = getch()
 
-            # ── Quit ──────────────────────────────────────────────────────────
             if key in (chr(QKEY_ASCII_VALUE), chr(ESC_ASCII_VALUE)):
                 running = False
                 continue
 
-            # ── Coast / stop ──────────────────────────────────────────────────
             elif key == chr(SPACE_ASCII_VALUE):
                 zero_all_currents(motors, currents)
                 active_key = None
                 print("[COAST] All currents zeroed.")
 
-            # ── Home ──────────────────────────────────────────────────────────
-            #elif key == chr(BKEY_ASCII_VALUE):      # 'b' mapped to home (H)
-            #    zero_all_currents(motors, currents)
-            #    active_key = None
-            #    positions  = home_all_motors(motors, packet, port)
-
-            # ── Status print ──────────────────────────────────────────────────
             elif key == chr(PKEY_ASCII_VALUE):
+                # ✅ Pass full limits dict
                 print_status(positions, currents, limits)
 
-            # ── Drive key ─────────────────────────────────────────────────────
             elif key in KEY_MAP:
                 active_key = key
 
-            # ── Any other key releases the active drive ───────────────────────
             else:
                 active_key = None
                 zero_all_currents(motors, currents)
 
-        # ── 3c. Apply current for the active key ──────────────────────────────
+        # ── 4c. Apply current for the active key ──────────────────────────────
         if active_key and active_key in KEY_MAP:
             axis_id, direction, label = KEY_MAP[active_key]
 
+            pos        = positions[axis_id]
+            motor_lims = limits[axis_id]            # ✅ per-motor sub-dict
+
             # ── Per-motor hard limit check ────────────────────────────────────
-            pos = positions[axis_id]
-            at_min = (pos <= limits['MIN'] and direction < 0)
-            at_max = (pos >= limits['MAX'] and direction > 0)
+            # ✅ Access lowercase keys from init_dynamic_limits()
+            at_min = (pos <= motor_lims['min'] and direction < 0)
+            at_max = (pos >= motor_lims['max'] and direction > 0)
 
             if at_min or at_max:
-                # Motor is at its individual soft limit — zero its current
                 motors[axis_id].send_torque_cmd(0)
                 currents[axis_id] = 0
                 print(
@@ -496,29 +525,31 @@ def main():
                 )
 
             # ── Geometric collision check ─────────────────────────────────────
+            # ✅ Pass full limits dict so combined_deviation works correctly
             elif collision_blocked(positions, axis_id, direction, limits):
                 motors[axis_id].send_torque_cmd(0)
                 currents[axis_id] = 0
                 print(
                     f"[SAFETY] Combined deviation limit reached — "
-                    f"move blocked. Press SPACE or H to re-centre."
+                    f"move blocked. Press SPACE to coast."
                 )
 
             else:
                 # ── Compute and send safe current ─────────────────────────────
-                raw_mA  = direction * DRIVE_CURRENT
-                cmd_mA  = safe_current(raw_mA, pos, limits)
+                raw_mA = direction * DRIVE_CURRENT
+                # ✅ Pass per-motor sub-dict to safe_current
+                cmd_mA = safe_current(raw_mA, pos, motor_lims)
 
                 motors[axis_id].send_torque_cmd(cmd_mA)
                 currents[axis_id] = cmd_mA
 
-                # Keep all OTHER motors at zero (coast)
+                # Coast all other motors
                 for other_id in ALL_IDS:
                     if other_id != axis_id:
                         motors[other_id].send_torque_cmd(0)
                         currents[other_id] = 0
 
-        # ── 3d. Periodic auto-print every 2 s ─────────────────────────────────
+        # ── 4d. Periodic status print every 2 s ──────────────────────────────
         now = time.time()
         if now - last_print_time >= 2.0:
             print(
@@ -533,13 +564,13 @@ def main():
             )
             last_print_time = now
 
-        # ── 3e. Pace the loop ─────────────────────────────────────────────────
+        # ── 4e. Pace the loop ─────────────────────────────────────────────────
         elapsed = time.time() - loop_start
         sleep_t = LOOP_DT - elapsed
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-    # ── 4. Clean shutdown ─────────────────────────────────────────────────────
+    # ── 5. Clean shutdown ─────────────────────────────────────────────────────
     shutdown(motors, port)
 
 

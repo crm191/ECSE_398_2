@@ -180,20 +180,6 @@ class Dynamixel:
         # print(f"data 4: {bin(data[3])}\n")
         
         d3 = bin(data[3])[2:].zfill(8)
-        # print(f"combine the bits together: {comb}\n")
-        
-        # print(f"we should get 4337: {check}")
-        # check_d = twos_comp(data_read)
-        # if your binary number starts with a 1, you know it's negative, therefore you need to convert
-        # if result != COMM_SUCCESS:
-        #     print("%s" % self.packetHandler.getTxRxResult(result))
-        # elif error != 0:
-        #     print("%s" % self.packetHandler.getRxPacketError(error))
-        # else:
-        #     pass
-            # print(f"Present Position for motor {self.ID} is {dxl_present_position}")
-        # print(f"What sdk wants to output: {data_read}\n")
-        # print(f"what we will output: {check_d}\n")
         if d3[0] == '0':
             return data_read
         else:
