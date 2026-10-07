@@ -83,7 +83,7 @@ else:
 from dynamixel_sdk import *
 from Dynamixel import *
 from Constants import *
-from dyn_functions import to_radians
+# from dyn_functions import to_radians
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FLIPPER CONSTANTS
@@ -289,6 +289,7 @@ def init_motors(port, packet) -> dict:
 
     return motors
 
+# Figure out if needed. Depends on home position
 def init_dynamic_limits(motors: dict) -> dict:
     """
     Read each motor's actual startup position and build

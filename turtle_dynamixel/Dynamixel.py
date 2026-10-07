@@ -104,6 +104,7 @@ class Dynamixel:
             print("%s" % self.packetHandler.getRxPacketError(dxl_error))
         else:
             print("Max velocity has been set")
+
     def enable_torque(self):
         #Enable Dynamixel Torque
         dxl_comm_result, dxl_error = self.packetHandler.write1ByteTxRx(self.portHandler, self.ID, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
@@ -113,6 +114,7 @@ class Dynamixel:
             print("%s" % self.packetHandler.getRxPacketError(dxl_error))
         else:
             print("Dynamixel torque has been set")
+
     def disable_torque(self):
         # Disable Dynamixel Torque
         dxl_comm_result, dxl_error = self.packetHandler.write1ByteTxRx(self.portHandler, self.ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
@@ -122,6 +124,7 @@ class Dynamixel:
             print("%s" % self.packetHandler.getRxPacketError(dxl_error))
         else:
             print("Dynamixel torque has been set")
+
     def set_goal_position(self, goal_pos):
         # Write goal position
         dxl_comm_result, dxl_error = self.packetHandler.write4ByteTxRx(self.portHandler, self.ID, ADDR_GOAL_POSITION, goal_pos)
@@ -158,6 +161,15 @@ class Dynamixel:
         # Read present position --> gives you steps/rev (360 deg = 4095)
         # dxl_present_position, dxl_comm_result, dxl_error = self.packetHandler.read4ByteTxRx(self.portHandler, self.ID, ADDR_PRESENT_POSITION)
         data, result, error = self.packetHandler.readTxRx(self.portHandler, self.ID, ADDR_PRESENT_POSITION, 4)
+
+        # Data Check
+        if result != COMM_SUCCESS:
+            print("%s" % self.packetHandler.getTxRxResult(result))
+        elif error != 0:
+             print("%s" % self.packetHandler.getRxPacketError(error))
+        else:
+             pass
+        
         data_read = DXL_MAKEDWORD(DXL_MAKEWORD(data[0], data[1]),
                                   DXL_MAKEWORD(data[2], data[3])) if (result == COMM_SUCCESS) else 0
         # data read is decimal value
@@ -185,9 +197,9 @@ class Dynamixel:
         if d3[0] == '0':
             return data_read
         else:
-            d0 = bin(data[0])[2:]
-            d1 = bin(data[1])[2:]
-            d2 = bin(data[2])[2:]
+            d0 = bin(data[0])[2:].zfill(8)
+            d1 = bin(data[1])[2:].zfill(8)
+            d2 = bin(data[2])[2:].zfill(8)
             comb = d3 + d2 + d1 + d0
             #print(f"comb: {comb}\n")
             check = twos_comp(comb)
