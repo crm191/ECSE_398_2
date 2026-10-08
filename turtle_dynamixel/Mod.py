@@ -4,7 +4,7 @@
 Below is a class that defines a module of Dyamixels for group sync read and write
 
 """
-DDR_POS_D_GAIN              = 80
+ADDR_POS_D_GAIN              = 80
 ADDR_POS_I_GAIN             = 82
 ADDR_POS_P_GAIN             = 84
 ADDR_TORQUE_ENABLE          = 64
@@ -77,6 +77,7 @@ class Mod:
                 quit()
         # self.set_watchdog()
         print(f"[STATUS] Mod initialized with IDS: {self.IDS}\n")
+
     def enable_torque(self):
         #Enable Dynamixel Torques
         for ID in self.IDS:
@@ -90,6 +91,7 @@ class Mod:
                 print("%s" % self.packetHandler.getRxPacketError(dxl_error))
             else:
                 print(f"[STATUS] Torque Enabled for motor {ID}\n")
+
     def disable_torque(self):
         for ID in self.IDS:
             dxl_comm_result, dxl_error = self.packetHandler.write1ByteTxRx(self.portHandler, ID, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
@@ -147,16 +149,68 @@ class Mod:
         # note about line below- though dxl_comm_result isn't used, you still need to call txRxPacket()
         # otherwise dynamixel won't read out its position 
         t = time.time()
+
+        '''
+        New try that manually retries the packet read if it fails. Has a set number of retries before giving up and returning None.
+        Goal is to allow the bus to clear if that is the issue.
+        '''
+
+        # Code
+        MAX_RETRIES = 3
+        RETRY_DELAY = 0.005     # 5ms — long enough for bus to clear
+        # ── Retry loop ────────────────────────────────────────────────────────
+        for attempt in range(MAX_RETRIES):
+            dxl_comm_result = self.groupSyncRead.txRxPacket()
+
+            if dxl_comm_result == COMM_SUCCESS:
+                break           # Packet received — proceed to decode
+
+            print(f"[ERROR] GroupSyncRead attempt {attempt + 1}/{MAX_RETRIES} "
+                f"failed: {self.packetHandler.getTxRxResult(dxl_comm_result)}")
+
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY)     # wait for bus to clear before retry
+        else:
+            # for...else — only runs if loop never hit break (all retries failed)
+            print(f"[ERROR] GroupSyncRead failed after {MAX_RETRIES} attempts.")
+            return None
+
+        '''
+        Original SyncRead code from Dynamixel SDK. Sporadic COMM failures happen and are printed then ignored.
+        
+        # Code
         dxl_comm_result = self.groupSyncRead.txRxPacket()
+        # Check if the syncread was successful before data
+        if dxl_comm_result != COMM_SUCCESS:
+                print(f"[ERROR] GroupSyncRead failed: "
+                    f"{self.packetHandler.getTxRxResult(dxl_comm_result)}")
+                return None     # ← caller must handle None gracefully
+        '''
+
         # print(f"[DEBUG] dt: {time.time() - t}\n") 
         address = ADDR_PRESENT_POSITION
         # print(f"address: {address}\n")
-        pos = []
+        pos = [None] * len(self.IDS)  # Initialize pos list with None values
         # print(f"pos dict: {self.groupSyncRead.data_dict}")
-        for ID in self.IDS:
+
+        for i, ID in enumerate(self.IDS):
+
+            # Check if the ID is present in the data_dict before accessing it
+            if ID not in self.groupSyncRead.data_dict:
+                print(f"[ERROR] Motor {ID} missing from GroupSyncRead data_dict.")
+                # pos[i] stays None - keeps indexing consistent with self.IDS
+                continue
+
             # print(f"ID pos: {ID}\n")
             data = self.groupSyncRead.data_dict[ID]
             # print(f"data: {data}\n")
+
+            # Check if the data is valid and has the expected length
+            if data is None or len(data) < 4:
+                print(f"[ERROR] Motor {ID} returned incomplete data: {data}")
+                # pos[i] stays None - keeps indexing consistent with self.IDS
+                continue
+
             d3 = bin(data[3])[2:]
             # print(f"byte: {d3}\n")
             if d3[0] == '0':
@@ -164,7 +218,7 @@ class Mod:
                                               self.groupSyncRead.data_dict[ID][address - self.groupSyncRead.start_address + 1]),
                                  DXL_MAKEWORD(self.groupSyncRead.data_dict[ID][address - self.groupSyncRead.start_address + 2],
                                               self.groupSyncRead.data_dict[ID][address - self.groupSyncRead.start_address + 3])) 
-                pos.append(to_radians(p))
+                pos[i] = to_radians(p)
             else:
                 # TODO: test for loop
                 comb = d3
@@ -175,7 +229,7 @@ class Mod:
                     else:
                         comb += bin(data[i])[2:]
                 p = twos_comp(comb)
-                pos.append(to_radians(p))
+                pos[i] = to_radians(p)
         return pos
     def get_velocity(self):
         '''
@@ -236,7 +290,7 @@ class Mod:
             elif dxl_error != 0:
                 print("%s" % self.packetHandler.getRxPacketError(dxl_error))
             else:
-                print(f"[STATUS] Motor {ID} operating mode changed to current control mode.")
+                print(f"[STATUS] Motor {ID} operating mode changed to velocity control mode.")
     def set_current_cntrl_back_fins(self):
         # Set operating mode to current control mode (used for torque control)
         back_fins = [7,8,9,10]

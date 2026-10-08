@@ -83,6 +83,7 @@ else:
 from dynamixel_sdk import *
 from Dynamixel import *
 from Constants import *
+from Mod import *
 # from dyn_functions import to_radians
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -129,7 +130,7 @@ HOLD_CURRENT     = 0                 # 0 mA to coast when idle
 COMBINED_DEV_LIMIT = int(6 * MAX_DELTA_STEPS)    #  steps
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-LOOP_HZ = 20
+LOOP_HZ = 1000
 LOOP_DT = 1.0 / LOOP_HZ    # 50 ms per iteration
 
 # ── Homing parameters ────────────────────────────────────────────────────────
@@ -479,7 +480,7 @@ def main():
 
     # ── 4. Control loop ───────────────────────────────────────────────────────
     running         = True
-    active_key      = None
+    active_keys      = None
     last_print_time = 0.0
 
     while running:
