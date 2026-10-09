@@ -41,9 +41,9 @@ from Constants import *     # portHandlerJoint, packetHandlerJoint, JOINTS, etc.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Motor IDs (front flipper only) ───────────────────────────────────────────
-MOTOR_ID_X  = 1        # Forward / backward stroke
-MOTOR_ID_Y  = 2        # Lateral sweep
-MOTOR_ID_Z  = 3        # Vertical pitch
+MOTOR_ID_X  = 1        # Forward / backward stroke (flap)
+MOTOR_ID_Y  = 2        # Lateral sweep (side-to-side)
+MOTOR_ID_Z  = 3        # Vertical pitch (pitch / twist)
 
 ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
