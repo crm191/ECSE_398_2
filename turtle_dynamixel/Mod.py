@@ -157,7 +157,7 @@ class Mod:
 
         # Code
         MAX_RETRIES = 3
-        RETRY_DELAY = 0.005     # 5ms — long enough for bus to clear
+        RETRY_DELAY = 0.0005     # 5ms — long enough for bus to clear
         # ── Retry loop ────────────────────────────────────────────────────────
         for attempt in range(MAX_RETRIES):
             dxl_comm_result = self.groupSyncRead.txRxPacket()

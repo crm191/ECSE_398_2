@@ -73,10 +73,10 @@ HOLD_CURRENT     = 0
 
 # ── Collision safety ──────────────────────────────────────────────────────────
 # Each motor can use its full individual range before combined check triggers.
-COMBINED_DEV_LIMIT = 3.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
+COMBINED_DEV_LIMIT = 10.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-LOOP_HZ = 500
+LOOP_HZ = 1000
 LOOP_DT = 1.0 / LOOP_HZ            # 2.0 ms per iteration
 
 # ── Homing ────────────────────────────────────────────────────────────────────
