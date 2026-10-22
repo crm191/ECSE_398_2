@@ -23,6 +23,7 @@ Controls:
     SPACE   →  Zero ALL currents (coast to stop)
     P       →  Print live positions + active currents
     Q / ESC →  Safe shutdown
+    H       →  Home all motors to startup positions
 """
 
 import os
@@ -55,7 +56,7 @@ ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 STEPS_TO_RAD  = (2 * math.pi) / 4096
 RAD_TO_STEPS  = 4096 / (2 * math.pi)
 
-MAX_DELTA_RAD = 114 * STEPS_TO_RAD     # ±10° soft travel limit per axis
+MAX_DELTA_RAD = 114 * 5 * STEPS_TO_RAD     # ±10° x 1 soft travel limit per axis
 RAMP_ZONE_RAD =  50 * STEPS_TO_RAD     # deceleration band near each limit
 
 # Home threshold for settling check during homing
@@ -64,8 +65,8 @@ HOME_THRESHOLD_RAD = DXL_MOVING_STATUS_THRESHOLD * STEPS_TO_RAD
 # ── Current commands ──────────────────────────────────────────────────────────
 # XW540-T260: 1 register step = 2.69 mA
 CURRENT_UNIT_MA  = 2.69         # mA per register step
-DRIVE_CURRENT_MA = 50          # desired drive current  (mA)
-CEILING_MA       = 150          # desired ceiling        (mA)
+DRIVE_CURRENT_MA = 20          # desired drive current  (mA)
+CEILING_MA       = 250          # desired ceiling        (mA)
 
 DRIVE_CURRENT    = int(DRIVE_CURRENT_MA / CURRENT_UNIT_MA)  # ≈ 56 steps
 CURRENT_CEILING  = int(CEILING_MA       / CURRENT_UNIT_MA)  # ≈ 186 steps
@@ -73,7 +74,7 @@ HOLD_CURRENT     = 0
 
 # ── Collision safety ──────────────────────────────────────────────────────────
 # Each motor can use its full individual range before combined check triggers.
-COMBINED_DEV_LIMIT = 10.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
+COMBINED_DEV_LIMIT = 3.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 LOOP_HZ = 1000
@@ -440,6 +441,7 @@ def main():
     SPACE   →  Zero all currents  (coast to stop)
     P       →  Print live status
     Q / ESC →  Safe shutdown
+    H       →  Home all motors to startup positions
     """)
 
     # ── 1. Hardware setup ─────────────────────────────────────────────────────
@@ -479,6 +481,12 @@ def main():
             time.sleep(0.2)     # debounce
             continue
 
+        if keyboard.is_pressed('h'):
+            print("[HOME] Homing all motors ...")
+            positions = home_all_motors(mod, port, packet, limits)
+            time.sleep(0.2)     # debounce
+            continue
+
         if keyboard.is_pressed('p'):
             print_status(positions, currents, limits)
             time.sleep(0.2)     # debounce
@@ -504,6 +512,9 @@ def main():
                 mid        = ALL_IDS[idx]
                 pos        = positions[mid]
                 motor_lims = limits[mid]
+
+                # ── Print debug info for each key press ─────────────────────────────
+                print(f"Active key: {key} -> {label}")
 
                 # ── Per-motor hard limit check ────────────────────────────────
                 at_min = (pos <= motor_lims['min'] and direction < 0)
