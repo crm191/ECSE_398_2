@@ -26,6 +26,7 @@ Controls:
     H       →  Home all motors to startup positions
 """
 
+from ast import mod
 import os
 import sys
 import time
@@ -48,6 +49,10 @@ MOTOR_ID_Z  = 3        # Vertical pitch (pitch / twist)
 
 ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
+# ── Home Positions in RADIANS ───────────────────────────────────────────────
+# Home positions are set at startup and used for soft limits and collision checks.
+HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+
 # ── Position limits in RADIANS ────────────────────────────────────────────────
 # Mod.get_position() returns radians so all limits must match.
 # Conversion: steps × (2π / 4096) = radians
@@ -56,7 +61,7 @@ ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 STEPS_TO_RAD  = (2 * math.pi) / 4096
 RAD_TO_STEPS  = 4096 / (2 * math.pi)
 
-MAX_DELTA_RAD = 114 * 5 * STEPS_TO_RAD     # ±10° x 1 soft travel limit per axis
+MAX_DELTA_RAD = 114 * 3 * STEPS_TO_RAD     # ±10° x 3 soft travel limit per axis
 RAMP_ZONE_RAD =  50 * STEPS_TO_RAD     # deceleration band near each limit
 
 # Home threshold for settling check during homing
@@ -65,7 +70,7 @@ HOME_THRESHOLD_RAD = DXL_MOVING_STATUS_THRESHOLD * STEPS_TO_RAD
 # ── Current commands ──────────────────────────────────────────────────────────
 # XW540-T260: 1 register step = 2.69 mA
 CURRENT_UNIT_MA  = 2.69         # mA per register step
-DRIVE_CURRENT_MA = 20          # desired drive current  (mA)
+DRIVE_CURRENT_MA = 120          # desired drive current  (mA)
 CEILING_MA       = 250          # desired ceiling        (mA)
 
 DRIVE_CURRENT    = int(DRIVE_CURRENT_MA / CURRENT_UNIT_MA)  # ≈ 56 steps
@@ -107,6 +112,10 @@ def clamp(value: int, lo: int, hi: int) -> int:
 def rad_to_deg(rad: float) -> float:
     """Convert radians to degrees for display."""
     return round(math.degrees(rad), 2)
+
+def deg_to_rad(deg: float) -> float:
+    """Convert degrees to radians."""
+    return math.radians(deg)
 
 
 def to_unsigned_16(val: int) -> int:
@@ -309,21 +318,26 @@ def init_dynamic_limits(mod: 'Mod') -> dict:
     { motor_id: {'home': radians, 'min': radians, 'max': radians} }
     """
     all_limits = {}
-    positions  = read_all_positions(mod, {mid: 0.0 for mid in ALL_IDS})
+    
+    #Initial method to establish limits wherever each motor is at during startup.
+    #Now that the motors are attached to the load cell and suspended, the home position and limits can be set.
+
+    #positions  = read_all_positions(mod, {mid: 0.0 for mid in ALL_IDS})
 
     for mid in ALL_IDS:
-        home = positions[mid]
+        #home = positions[mid]
         all_limits[mid] = {
-            'home': home,
-            'min' : home - MAX_DELTA_RAD,
-            'max' : home + MAX_DELTA_RAD,
+            'home': HOME_POSITIONS_RAD[mid-1],  # Home position in radians
+            'min' : HOME_POSITIONS_RAD[mid-1] - MAX_DELTA_RAD,
+            'max' : HOME_POSITIONS_RAD[mid-1] + MAX_DELTA_RAD,
         }
         print(
             f"[LIMITS] Motor {mid} — "
-            f"Home: {rad_to_deg(home):.2f}°  "
-            f"Min:  {rad_to_deg(home - MAX_DELTA_RAD):.2f}°  "
-            f"Max:  {rad_to_deg(home + MAX_DELTA_RAD):.2f}°"
+            f"Home: {rad_to_deg(HOME_POSITIONS_RAD[mid-1]):.2f}°  "
+            f"Min:  {rad_to_deg(HOME_POSITIONS_RAD[mid-1] - MAX_DELTA_RAD):.2f}°  "
+            f"Max:  {rad_to_deg(HOME_POSITIONS_RAD[mid-1] + MAX_DELTA_RAD):.2f}°"
         )
+    
     return all_limits
 
 
@@ -448,8 +462,19 @@ def main():
     port, packet = init_port()
     mod          = init_mod(port, packet)
 
-    # ── 2. Build dynamic limits from actual startup positions ─────────────────
+    # ── 2.a Build dynamic limits from actual startup positions ─────────────────
     limits = init_dynamic_limits(mod)
+
+    # ── 2.b Home all motors to their startup positions ─────────────────────────────
+    verify = input("Verify all motors can safely move to their home positions? (y/n): ")
+    if verify.lower() != 'y':
+        print("[ERROR] Please check the motors and restart the program.")
+        shutdown(mod, port)
+        sys.exit(1)
+    elif verify.lower() == 'y':
+        print("[OK] Motors verified to move safely to home positions. Continuing...\n") 
+        positions = home_all_motors(mod, port, packet, limits)
+        time.sleep(5)
 
     # ── 3. State tracking ─────────────────────────────────────────────────────
     # positions : { motor_id: radians } — updated each loop via GroupSyncRead
@@ -514,7 +539,7 @@ def main():
                 motor_lims = limits[mid]
 
                 # ── Print debug info for each key press ─────────────────────────────
-                print(f"Active key: {key} -> {label}")
+                # print(f"Active key: {key} -> {label}")
 
                 # ── Per-motor hard limit check ────────────────────────────────
                 at_min = (pos <= motor_lims['min'] and direction < 0)

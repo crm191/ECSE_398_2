@@ -4,8 +4,8 @@ import numpy as np
 
 def main():
     # Create test inputs for mass and torque control functions
-    q = np.array([120, 350, 270], [0, 0, 0])  # Example joint positions (0-360 degrees)
-    print(q[0])
+    q = np.array([120, 350, 270])  # Example joint positions (0-360 degrees)
+    print(q[0][0])
     dq = np.array([5, 10, 15])     # Example joint velocities
 
     qd = np.array([130, 360, 280]) # Desired joint positions
