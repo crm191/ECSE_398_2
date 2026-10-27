@@ -5,6 +5,8 @@ from math import sqrt, sin, cos
 from scipy.linalg import block_diag
 def mass(q, dq):
 
+    # q is an array of joint positions (in degrees) for each joint
+    # q = np.array([[q1], [q2], [q3], [q4], [q5], [q6]])
     q1 = q[0][0] - np.pi
     q2 = q[1][0] - np.pi
     q3 = q[2][0] - np.pi
@@ -14,13 +16,13 @@ def mass(q, dq):
     q6 = q[5][0] - np.pi
 
 
-    dq1 = q[0][0]
-    dq2 = q[1][0]
-    dq3 = q[2][0]
+    dq1 = dq[0][0]
+    dq2 = dq[1][0]
+    dq3 = dq[2][0]
 
-    dq4 = q[3][0]
-    dq5 = q[4][0]
-    dq6 = q[5][0]
+    dq4 = dq[3][0]
+    dq5 = dq[4][0]
+    dq6 = dq[5][0]
 
     gr = 9.81
     m = 0.2

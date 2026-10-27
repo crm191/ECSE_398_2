@@ -124,19 +124,23 @@ ALL_IDS    = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 N_MOTORS   = len(ALL_IDS)
 N_DOF      = 6          # full system DOF — second flipper padded with zeros
 
+# ── Home Positions in RADIANS ───────────────────────────────────────────────
+# Home positions are set at startup and used for soft limits and collision checks.
+HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+
 # ── Unit conversions ──────────────────────────────────────────────────────────
 STEPS_TO_RAD = (2 * math.pi) / 4096
 RAD_TO_STEPS = 4096 / (2 * math.pi)
 
 # ── Position limits (radians) ─────────────────────────────────────────────────
-MAX_DELTA_RAD      = 114 * 0.5 * STEPS_TO_RAD    # ±5° soft travel limit
+MAX_DELTA_RAD      = 114 * 1 * STEPS_TO_RAD    # ±10° x 1 soft travel limit
 RAMP_ZONE_RAD      =  50 * STEPS_TO_RAD    # deceleration band near limit
 HOME_THRESHOLD_RAD = DXL_MOVING_STATUS_THRESHOLD * STEPS_TO_RAD
 
 # ── Current / hardware limits ─────────────────────────────────────────────────
 # XW540-T260: 2.69 mA per register step
 CURRENT_UNIT_MA    = 2.69
-CURRENT_CEILING_MA = 500
+CURRENT_CEILING_MA = 250
 CURRENT_CEILING    = int(CURRENT_CEILING_MA / CURRENT_UNIT_MA)  # ≈ 186 steps
 HOLD_CURRENT       = 0
 
@@ -237,7 +241,7 @@ def cosine_segment(start: float, end: float, n_points: int) -> np.ndarray:
     Smooth position profile from start to end using cosine interpolation.
     Zero velocity at both endpoints.
 
-    q(t) = start + (end - start) × (1 - cos(π·t)) / 2
+    q(t) = start + (end - start) x (1 - cos(π·t)) / 2
     """
     t     = np.linspace(0.0, 1.0, n_points)
     alpha = (1.0 - np.cos(np.pi * t)) / 2.0
@@ -377,19 +381,19 @@ def init_dynamic_limits(mod: 'Mod') -> dict:
     all_limits = {}
     positions  = read_all_positions(mod, {mid: 0.0 for mid in ALL_IDS})
     for mid in ALL_IDS:
-        home = positions[mid]
+        #home = positions[mid]
         all_limits[mid] = {
-            'home' : home,
-            'lower': home - MAX_DELTA_RAD,
-            'upper': home + MAX_DELTA_RAD,
-            'min'  : home - MAX_DELTA_RAD,
-            'max'  : home + MAX_DELTA_RAD,
+            'home' : HOME_POSITIONS_RAD[mid - 1],  # use predefined home positions
+            'lower': HOME_POSITIONS_RAD[mid - 1] - MAX_DELTA_RAD,
+            'upper': HOME_POSITIONS_RAD[mid - 1] + MAX_DELTA_RAD,
+            'min'  : HOME_POSITIONS_RAD[mid - 1] - MAX_DELTA_RAD,
+            'max'  : HOME_POSITIONS_RAD[mid - 1] + MAX_DELTA_RAD,
         }
         print(
             f"[LIMITS] Motor {mid} ({MOTOR_LABELS[mid]}) — "
-            f"Home: {rad_to_deg(home):>8.2f}°  "
-            f"Lower: {rad_to_deg(home - MAX_DELTA_RAD):>8.2f}°  "
-            f"Upper: {rad_to_deg(home + MAX_DELTA_RAD):>8.2f}°"
+            f"Home: {rad_to_deg(HOME_POSITIONS_RAD[mid - 1]):>8.2f}°  "
+            f"Lower: {rad_to_deg(HOME_POSITIONS_RAD[mid - 1] - MAX_DELTA_RAD):>8.2f}°  "
+            f"Upper: {rad_to_deg(HOME_POSITIONS_RAD[mid - 1] + MAX_DELTA_RAD):>8.2f}°"
         )
     return all_limits
 
@@ -520,7 +524,7 @@ def compute_single_motor_torque(active_mid: int,
     try:
         tau_steps = torque_control(
             q_vec, dq_vec, qd_vec, dqd_vec, ddqd_vec, Kp, Kd
-        )   # (3,1) int array
+        )
     except Exception as e:
         print(f"[ERROR] torque_control() failed: {e} — zeroing all currents.")
         return {mid: 0 for mid in ALL_IDS}

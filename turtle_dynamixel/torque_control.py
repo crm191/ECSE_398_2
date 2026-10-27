@@ -13,7 +13,7 @@ from mass import mass
 def torque_control(q,dq,qd,dqd,ddqd, Kp, KD):
 
     M, C, G = mass(q, dq)
-    tau = C.dot(dq[:3]) + M.dot(ddqd[:3]) + Kp[:3,:3].dot((qd[:3]-q[:3])) + KD[:3,:3].dot(dqd[:3] - dq[:3]) + G.reshape(-1,1)
+    tau = C.dot(dq[:6]) + M.dot(ddqd[:6]) + Kp[:6,:6].dot((qd[:6]-q[:6])) + KD[:6,:6].dot(dqd[:6] - dq[:6]) + G.reshape(-1,1)
     # tau = Kp[:6,:6].dot((qd[:6]-q[:6])) + KD[:6,:6].dot(dqd[:6] - dq[:6])
         
     # print(f"[DEBUG] G: {G}\n")
