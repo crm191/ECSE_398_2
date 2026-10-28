@@ -4,7 +4,7 @@
 Below is a class that defines a module of Dyamixels for group sync read and write
 
 """
-ADDR_POS_D_GAIN              = 80
+ADDR_POS_D_GAIN             = 80
 ADDR_POS_I_GAIN             = 82
 ADDR_POS_P_GAIN             = 84
 ADDR_TORQUE_ENABLE          = 64

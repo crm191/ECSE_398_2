@@ -32,7 +32,8 @@ File dependencies:
     torque_control.py — computed torque + PD controller
     mass.py           — dynamic model (M, C, G matrices)
 """
-
+import os
+from datetime import datetime
 import sys
 import time
 import math
@@ -117,43 +118,43 @@ def handle_estop(mod: 'Mod') -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Motor IDs ─────────────────────────────────────────────────────────────────
-MOTOR_ID_X = 1
-MOTOR_ID_Y = 2
-MOTOR_ID_Z = 3
+MOTOR_ID_X = 1          # Controls rotation around x-axis (roll)
+MOTOR_ID_Y = 2          # Controls rotation around y-axis (pitch)
+MOTOR_ID_Z = 3          # Controls rotation around z-axis (yaw)
 ALL_IDS    = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 N_MOTORS   = len(ALL_IDS)
 N_DOF      = 6          # full system DOF — second flipper padded with zeros
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [-2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
 
 # ── Unit conversions ──────────────────────────────────────────────────────────
 STEPS_TO_RAD = (2 * math.pi) / 4096
 RAD_TO_STEPS = 4096 / (2 * math.pi)
 
 # ── Position limits (radians) ─────────────────────────────────────────────────
-MAX_DELTA_RAD      = 114 * 1 * STEPS_TO_RAD    # ±10° x 1 soft travel limit
+MAX_DELTA_RAD      = 114 * 3 * STEPS_TO_RAD    # ±10° x 3 soft travel limit
 RAMP_ZONE_RAD      =  50 * STEPS_TO_RAD    # deceleration band near limit
 HOME_THRESHOLD_RAD = DXL_MOVING_STATUS_THRESHOLD * STEPS_TO_RAD
 
 # ── Current / hardware limits ─────────────────────────────────────────────────
 # XW540-T260: 2.69 mA per register step
 CURRENT_UNIT_MA    = 2.69
-CURRENT_CEILING_MA = 250
+CURRENT_CEILING_MA = 300
 CURRENT_CEILING    = int(CURRENT_CEILING_MA / CURRENT_UNIT_MA)  # ≈ 186 steps
 HOLD_CURRENT       = 0
 
 # ── PD Controller gains ───────────────────────────────────────────────────────
-KP_VAL = 2.0        # proportional gain (Nm/rad)
-KD_VAL = 0.5        # derivative gain   (Nm·s/rad)
-Kp = np.diag([KP_VAL] * N_DOF)
-Kd = np.diag([KD_VAL] * N_DOF)
+# KP_VAL = 4        # proportional gain (Nm/rad)
+# KD_VAL = 0.25        # derivative gain   (Nm·s/rad)
+Kp = np.diag([5, 4, 5, 0, 0, 0])
+Kd = np.diag([0.3, 0.3, 0.4, 0, 0, 0])
 
 # ── Trajectory parameters ─────────────────────────────────────────────────────
 LOOP_HZ          = 100
 LOOP_DT          = 1.0 / LOOP_HZ
-SEGMENT_DURATION = 3.0                              # seconds per segment
+SEGMENT_DURATION = 1.0                              # seconds per segment
 N_SEGMENT_POINTS = int(SEGMENT_DURATION * LOOP_HZ) # setpoints per segment
 STATUS_INTERVAL  = 0.5                              # status print interval (s)
 
@@ -751,29 +752,41 @@ def run_motor_trajectory(mod: 'Mod',
 
 def plot_results(all_logs: list) -> None:
     """
-    Plot position tracking and error for all motors.
-    Partial logs (aborted by ESC mid-trajectory) are plotted with
-    an annotation marking where the stop occurred.
+    Plot position tracking, tracking error, and commanded current
+    for all motors after the trajectory program completes.
 
-    Layout (one row per motor):
-        Left  : actual vs desired position  (deg) vs time (s)
-        Right : tracking error              (deg) vs time (s)
+    Layout (one row per motor, three columns):
+        Left   : actual vs desired position  (deg)  vs time (s)
+        Centre : position tracking error     (deg)  vs time (s)
+        Right  : commanded current           (mA)   vs time (s)
+
+    Current values are converted from register steps to mA:
+        I_mA = steps x CURRENT_UNIT_MA  (2.69 mA/step for XW540-T260)
+
+    Parameters
+    ----------
+    all_logs : list of log dicts returned by run_motor_trajectory()
     """
+    import os
+    from datetime import datetime
+
     n_motors = len(all_logs)
     if n_motors == 0:
         print("[PLOT] No data to plot.")
         return
 
+    # ── Figure layout — n_motors rows × 3 columns ─────────────────────────────
     fig, axes = plt.subplots(
-        n_motors, 2,
-        figsize=(14, 4 * n_motors),
+        n_motors, 3,
+        figsize=(18, 4 * n_motors),     # wider to accommodate 3 columns
         sharex='row'
     )
 
-    # Ensure axes is always 2D
+    # Ensure axes is always 2D even for a single motor
     if n_motors == 1:
         axes = np.array([axes])
 
+    # ── Colour scheme — one colour per motor ──────────────────────────────────
     colours = {
         MOTOR_ID_X: '#2196F3',      # blue
         MOTOR_ID_Y: '#4CAF50',      # green
@@ -781,9 +794,10 @@ def plot_results(all_logs: list) -> None:
     }
 
     fig.suptitle(
-        "Sea Turtle Flipper — Position Tracking Results\n"
+        "Sea Turtle Flipper — Trajectory Results\n"
         f"Computed Torque + PD Control  |  "
-        f"Kp={KP_VAL} Nm/rad  Kd={KD_VAL} Nm·s/rad",
+        f"Kp=(x={Kp[0][0]}, y={Kp[1][1]}, z={Kp[2][2]}) Nm/rad   Kd=(x={Kd[0][0]}, y={Kd[1][1]}, z={Kd[2][2]}) Nm·s/rad  |  "
+        f"Current unit: {CURRENT_UNIT_MA} mA/step",
         fontsize=13,
         fontweight='bold',
         y=1.01
@@ -800,10 +814,20 @@ def plot_results(all_logs: list) -> None:
         phase_times = log['phase_times']
         aborted     = log.get('aborted', False)
 
-        ax_pos = axes[row, 0]
-        ax_err = axes[row, 1]
+        # Convert register steps → mA for display
+        # Preserves sign so direction of current is visible
+        current_mA  = log['torque'] * CURRENT_UNIT_MA
 
-        # ── Position tracking subplot ─────────────────────────────────────────
+        title_suffix = " [ABORTED — ESC]" if aborted else ""
+        title_colour = 'red' if aborted else 'black'
+
+        ax_pos = axes[row, 0]   # left   — position tracking
+        ax_err = axes[row, 1]   # centre — tracking error
+        ax_cur = axes[row, 2]   # right  — commanded current
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  LEFT SUBPLOT — Position Tracking
+        # ══════════════════════════════════════════════════════════════════════
         ax_pos.plot(
             t, q_des,
             color='black', linewidth=1.5, linestyle='--',
@@ -820,15 +844,19 @@ def plot_results(all_logs: list) -> None:
             label='Tracking error region'
         )
 
-        # Phase boundary lines
+        # Phase boundary vertical lines
         for p_idx, pt in enumerate(phase_times):
-            ax_pos.axvline(x=pt, color='grey', linewidth=0.8, linestyle=':', zorder=1)
+            ax_pos.axvline(
+                x=pt, color='grey', linewidth=0.8,
+                linestyle=':', zorder=1
+            )
             ax_pos.text(
                 pt + 0.05, ax_pos.get_ylim()[0],
-                f'P{p_idx + 1}', fontsize=7, color='grey', va='bottom'
+                f'P{p_idx + 1}', fontsize=7,
+                color='grey', va='bottom'
             )
 
-        # Annotate position reference lines
+        # Home / lower / upper reference lines
         if len(q_des) > 0:
             home_deg  = q_des[0]
             lower_deg = q_des.min()
@@ -839,8 +867,8 @@ def plot_results(all_logs: list) -> None:
                 (upper_deg, 'upper', '--'),
             ]:
                 ax_pos.axhline(
-                    y=val, color='grey', linewidth=0.6,
-                    linestyle=ls, alpha=0.5
+                    y=val, color='grey',
+                    linewidth=0.6, linestyle=ls, alpha=0.5
                 )
                 ax_pos.text(
                     t[-1] if len(t) > 0 else 0, val,
@@ -848,7 +876,7 @@ def plot_results(all_logs: list) -> None:
                     fontsize=7, color='grey', va='center'
                 )
 
-        #   Annotate ESC abort point on position plot
+        # ESC abort annotation
         if aborted and len(t) > 0:
             ax_pos.axvline(
                 x=t[-1], color='red', linewidth=1.5,
@@ -860,18 +888,18 @@ def plot_results(all_logs: list) -> None:
                 color='red', va='top', fontweight='bold'
             )
 
-        title_suffix = " [ABORTED — ESC]" if aborted else ""
         ax_pos.set_title(
             f"Motor {mid} — {label}{title_suffix}\nPosition Tracking",
-            fontsize=10, fontweight='bold',
-            color='red' if aborted else 'black'
+            fontsize=10, fontweight='bold', color=title_colour
         )
         ax_pos.set_ylabel("Position (°)", fontsize=9)
         ax_pos.legend(fontsize=8, loc='upper right')
         ax_pos.grid(True, alpha=0.3)
         ax_pos.set_xlim(left=0)
 
-        # ── Tracking error subplot ────────────────────────────────────────────
+        # ══════════════════════════════════════════════════════════════════════
+        #  CENTRE SUBPLOT — Tracking Error
+        # ══════════════════════════════════════════════════════════════════════
         ax_err.plot(
             t, q_err,
             color=colour, linewidth=1.2,
@@ -884,9 +912,11 @@ def plot_results(all_logs: list) -> None:
         )
 
         for pt in phase_times:
-            ax_err.axvline(x=pt, color='grey', linewidth=0.8, linestyle=':', zorder=1)
+            ax_err.axvline(
+                x=pt, color='grey', linewidth=0.8,
+                linestyle=':', zorder=1
+            )
 
-        #   Annotate ESC abort point on error plot
         if aborted and len(t) > 0:
             ax_err.axvline(
                 x=t[-1], color='red', linewidth=1.5,
@@ -894,13 +924,12 @@ def plot_results(all_logs: list) -> None:
                 label='ESC stop'
             )
 
-        # RMS and peak error annotation
         if len(q_err) > 0:
             rms_err  = float(np.sqrt(np.mean(q_err ** 2)))
             peak_err = float(np.max(np.abs(q_err)))
             ax_err.text(
                 0.02, 0.95,
-                f"RMS error : {rms_err:.3f}°\nPeak error: {peak_err:.3f}°",
+                f"RMS  : {rms_err:.3f}°\nPeak : {peak_err:.3f}°",
                 transform=ax_err.transAxes,
                 fontsize=8, verticalalignment='top',
                 bbox=dict(
@@ -913,21 +942,108 @@ def plot_results(all_logs: list) -> None:
 
         ax_err.set_title(
             f"Motor {mid} — {label}{title_suffix}\nTracking Error ($q_d - q$)",
-            fontsize=10, fontweight='bold',
-            color='red' if aborted else 'black'
+            fontsize=10, fontweight='bold', color=title_colour
         )
         ax_err.set_ylabel("Error (°)", fontsize=9)
         ax_err.legend(fontsize=8, loc='upper right')
         ax_err.grid(True, alpha=0.3)
         ax_err.set_xlim(left=0)
 
+        # ══════════════════════════════════════════════════════════════════════
+        #  RIGHT SUBPLOT — Commanded Current (mA)
+        # ══════════════════════════════════════════════════════════════════════
+        ax_cur.plot(
+            t, current_mA,
+            color=colour, linewidth=1.2,
+            label='Commanded current (mA)'
+        )
+        ax_cur.fill_between(
+            t, current_mA, 0,
+            alpha=0.15, color=colour
+        )
+
+        # Zero line — separates positive and negative current
+        ax_cur.axhline(
+            y=0, color='black', linewidth=0.8,
+            linestyle='--', alpha=0.6
+        )
+
+        # Hardware ceiling lines — shows when current is being clamped
+        ax_cur.axhline(
+            y=+CURRENT_CEILING_MA,
+            color='red', linewidth=0.8,
+            linestyle=':', alpha=0.7,
+            label=f'Ceiling ±{CURRENT_CEILING_MA} mA'
+        )
+        ax_cur.axhline(
+            y=-CURRENT_CEILING_MA,
+            color='red', linewidth=0.8,
+            linestyle=':', alpha=0.7
+        )
+
+        # Phase boundary vertical lines
+        for pt in phase_times:
+            ax_cur.axvline(
+                x=pt, color='grey', linewidth=0.8,
+                linestyle=':', zorder=1
+            )
+
+        # ESC abort annotation
+        if aborted and len(t) > 0:
+            ax_cur.axvline(
+                x=t[-1], color='red', linewidth=1.5,
+                linestyle='--', zorder=4,
+                label='ESC stop'
+            )
+
+        # Annotate peak and RMS current
+        if len(current_mA) > 0:
+            peak_cur = float(np.max(np.abs(current_mA)))
+            rms_cur  = float(np.sqrt(np.mean(current_mA ** 2)))
+            mean_cur = float(np.mean(np.abs(current_mA)))
+            ax_cur.text(
+                0.02, 0.95,
+                f"Peak : {peak_cur:.1f} mA\n"
+                f"RMS  : {rms_cur:.1f} mA\n"
+                f"Mean : {mean_cur:.1f} mA",
+                transform=ax_cur.transAxes,
+                fontsize=8, verticalalignment='top',
+                bbox=dict(
+                    boxstyle='round,pad=0.3',
+                    facecolor='white',
+                    edgecolor='grey',
+                    alpha=0.8
+                )
+            )
+
+        ax_cur.set_title(
+            f"Motor {mid} — {label}{title_suffix}\n"
+            f"Commanded Current  ({CURRENT_UNIT_MA} mA/step)",
+            fontsize=10, fontweight='bold', color=title_colour
+        )
+        ax_cur.set_ylabel("Current (mA)", fontsize=9)
+        ax_cur.legend(fontsize=8, loc='upper right')
+        ax_cur.grid(True, alpha=0.3)
+        ax_cur.set_xlim(left=0)
+
+        # ── X-axis labels on bottom row only ──────────────────────────────────
         if row == n_motors - 1:
             ax_pos.set_xlabel("Time (s)", fontsize=9)
             ax_err.set_xlabel("Time (s)", fontsize=9)
+            ax_cur.set_xlabel("Time (s)", fontsize=9)
 
     plt.tight_layout()
 
-    filename = "flipper_trajectory_results.png"
+    # ── Build results folder and filename ─────────────────────────────────────
+    RESULTS_DIR = "flipper_results"
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename  = os.path.join(
+        RESULTS_DIR,
+        f"flipper_trajectory_Kp(x={Kp[0][0]}_y={Kp[1][1]}_z={Kp[2][2]})_Kd(x={Kd[0][0]}_y={Kd[1][1]}_z={Kd[2][2]})_{timestamp}.png"
+    )
+
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     print(f"\n[PLOT] Figure saved to: {filename}")
     plt.show()
@@ -944,12 +1060,12 @@ def main():
     print(f"""
   Control Law:
     τ = C(q,q̇)q̇_d + M(q)q̈_d + G(q) + Kp(q_d-q) + Kd(q̇_d-q̇)
-    Kp = {KP_VAL} Nm/rad      Kd = {KD_VAL} Nm·s/rad
+    Kp=(x={Kp[0][0]}, y={Kp[1][1]}, z={Kp[2][2]}) Nm/rad   Kd=(x={Kd[0][0]}, y={Kd[1][1]}, z={Kd[2][2]}) Nm·s/rad
 
   Trajectory per motor:
     home ──► lower_limit ──► upper_limit ──► home
-    Segment duration : {SEGMENT_DURATION:.1f} s × 3 = {3*SEGMENT_DURATION:.1f} s/motor
-    Total duration   : {3 * 3 * SEGMENT_DURATION:.1f} s ({3} motors × {3*SEGMENT_DURATION:.1f} s)
+    Segment duration : {SEGMENT_DURATION:.1f} s x 3 = {3*SEGMENT_DURATION:.1f} s/motor
+    Total duration   : {3 * 3 * SEGMENT_DURATION:.1f} s ({3} motors x {3*SEGMENT_DURATION:.1f} s)
     Loop rate        : {LOOP_HZ} Hz  ({N_SEGMENT_POINTS} setpoints/segment)
 
   Press ESC at any time to immediately stop all motors and exit.

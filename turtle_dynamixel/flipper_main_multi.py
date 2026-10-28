@@ -51,7 +51,7 @@ ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [-2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
 
 # ── Position limits in RADIANS ────────────────────────────────────────────────
 # Mod.get_position() returns radians so all limits must match.
@@ -79,7 +79,7 @@ HOLD_CURRENT     = 0
 
 # ── Collision safety ──────────────────────────────────────────────────────────
 # Each motor can use its full individual range before combined check triggers.
-COMBINED_DEV_LIMIT = 3.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
+COMBINED_DEV_LIMIT = 6.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 LOOP_HZ = 1000
