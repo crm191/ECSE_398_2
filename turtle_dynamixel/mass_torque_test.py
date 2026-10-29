@@ -3,7 +3,7 @@ from torque_control import*
 import numpy as np
 
 def main():
-    # Create test inputs for mass and torque control functions
+    # Create test inputs for mass and torque control functions - Manual test to see data types
 
     # Variables
     q1 = 360

@@ -20,7 +20,7 @@ Sequence:
     Motor 1 (X) completes full trajectory
     Motor 2 (Y) completes full trajectory
     Motor 3 (Z) completes full trajectory
-    All motors return to home → automatic shutdown
+    All motors return to home -> automatic shutdown
 
 Emergency stop:
     Press ESC at any time to immediately zero all currents and shut down.
@@ -31,9 +31,11 @@ File dependencies:
     Constants.py      — port, baud rate, hardware constants
     torque_control.py — computed torque + PD controller
     mass.py           — dynamic model (M, C, G matrices)
+    rft_sensor.py     — Robotous RFT60-HA01 (USB) driver + logger + live plot
 """
 import os
 from datetime import datetime
+import csv
 import sys
 import time
 import math
@@ -46,6 +48,8 @@ from dynamixel_sdk import *
 from Mod import *
 from Constants import *
 from torque_control import torque_control
+
+from rft_sensor import RFTSensor, CHANNELS
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  EMERGENCY STOP
@@ -127,7 +131,7 @@ N_DOF      = 6          # full system DOF — second flipper padded with zeros
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [-2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
 
 # ── Unit conversions ──────────────────────────────────────────────────────────
 STEPS_TO_RAD = (2 * math.pi) / 4096
@@ -146,10 +150,10 @@ CURRENT_CEILING    = int(CURRENT_CEILING_MA / CURRENT_UNIT_MA)  # ≈ 186 steps
 HOLD_CURRENT       = 0
 
 # ── PD Controller gains ───────────────────────────────────────────────────────
-# KP_VAL = 4        # proportional gain (Nm/rad)
-# KD_VAL = 0.25        # derivative gain   (Nm·s/rad)
-Kp = np.diag([5, 4, 5, 0, 0, 0])
-Kd = np.diag([0.3, 0.3, 0.4, 0, 0, 0])
+KP_VAL = 4        # proportional gain (Nm/rad)
+KD_VAL = 0.25        # derivative gain   (Nm·s/rad)
+Kp = np.diag([KP_VAL] * N_DOF)
+Kd = np.diag([KD_VAL] * N_DOF)
 
 # ── Trajectory parameters ─────────────────────────────────────────────────────
 LOOP_HZ          = 100
@@ -157,6 +161,12 @@ LOOP_DT          = 1.0 / LOOP_HZ
 SEGMENT_DURATION = 1.0                              # seconds per segment
 N_SEGMENT_POINTS = int(SEGMENT_DURATION * LOOP_HZ) # setpoints per segment
 STATUS_INTERVAL  = 0.5                              # status print interval (s)
+
+# ── Force-Torque Sensor Configuration ────────────────────────────────────────
+FT_PORT        = "COM4"         # Change to your F/T sensor COM port
+FT_BAUD        = 115200
+FT_RATE_HZ     = LOOP_HZ * 2    # 2× control loop for good coverage
+FT_FILTER_HZ   = 50             # 50 Hz low-pass — removes high-freq vibration
 
 # ── Homing ────────────────────────────────────────────────────────────────────
 HOME_NUDGE_VEL      = 20
@@ -170,9 +180,9 @@ MOTOR_LABELS = {
 }
 
 PHASE_LABELS = [
-    "home → lower limit",
-    "lower limit → upper limit",
-    "upper limit → home",
+    "home -> lower limit",
+    "lower limit -> upper limit",
+    "upper limit -> home",
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -188,7 +198,7 @@ def to_unsigned_16(val: int) -> int:
     """
     Convert signed int to unsigned 16-bit two's complement.
     Required because GroupSyncWrite expects unsigned values.
-    e.g. -56 → 65536 + (-56) = 65480
+    e.g. -56 -> 65536 + (-56) = 65480
     """
     if val < 0:
         return 65536 + val
@@ -398,6 +408,61 @@ def init_dynamic_limits(mod: 'Mod') -> dict:
         )
     return all_limits
 
+def init_ft_sensor() -> RFTSensor:
+    """
+    Initialise, configure, and tare the RFT60-HA01 F/T sensor.
+    Returns a streaming RFTSensor instance ready to collect data.
+
+    The sensor is attached at the base of Motor 1. It measures the
+    total reaction wrench of the entire 3-motor flipper chain:
+
+        Fx, Fy, Fz : reaction forces  (N)
+        Tx, Ty, Tz : reaction torques (N·m)
+
+    Taring removes gravity + static preload so only dynamic forces
+    from motor motion are recorded.
+    """
+    print(f"\n[F/T SENSOR] Connecting to {FT_PORT} @ {FT_BAUD} baud ...")
+    sensor = RFTSensor(FT_PORT, FT_BAUD)
+
+    model, sn, fw = sensor.info()
+    print(f"[F/T SENSOR] Model: {model}  S/N: {sn}  FW: {fw}")
+    print(f"[F/T SENSOR] DF={sensor.df:.0f}  DT={sensor.dt:.0f}")
+
+    sensor.configure(rate_hz=FT_RATE_HZ, filter_hz=FT_FILTER_HZ)
+    sensor.start()
+    time.sleep(0.3)
+    sensor.drain()              # discard startup transient
+
+    # ── Software tare — remove static preload ────────────────────────────────
+    print("[F/T SENSOR] Taring — keep motors STATIONARY ...")
+    tare_samples = sensor.collect(n=200, timeout=5.0)
+    if not tare_samples:
+        raise RuntimeError("[F/T SENSOR] No data received during tare — "
+                           "check USB connection and COM port.")
+
+    tare_arr           = np.array([s.ft for s in tare_samples])
+    sensor.tare_offset = tare_arr.mean(axis=0)     # (6,) offset vector
+    sensor.tare_std    = tare_arr.std(axis=0)
+
+    print(
+        f"[F/T SENSOR] Tare offset  (N / N·m): "
+        f"{np.round(sensor.tare_offset, 4)}"
+    )
+    print(
+        f"[F/T SENSOR] Noise std    (N / N·m): "
+        f"{np.round(sensor.tare_std, 4)}"
+    )
+    print("[F/T SENSOR] Ready.\n")
+    return sensor
+
+
+def close_ft_sensor(sensor: RFTSensor) -> None:
+    """Stop streaming and close the F/T sensor connection."""
+    print("[F/T SENSOR] Shutting down ...")
+    sensor.close()
+    print("[F/T SENSOR] Closed.\n")
+
 
 def home_all_motors(mod: 'Mod', port, packet,
                     all_limits: dict) -> dict:
@@ -504,7 +569,7 @@ def compute_single_motor_torque(active_mid: int,
     """
     active_idx = ALL_IDS.index(active_mid)
 
-    # Inactive motors track their current position → zero tracking error
+    # Inactive motors track their current position -> zero tracking error
     qd_list = [
         qd_active if mid == active_mid else positions[mid]
         for mid in ALL_IDS
@@ -574,24 +639,24 @@ def run_motor_trajectory(mod: 'Mod',
                          phase_indices:  list,
                          positions:      dict,
                          velocities:     dict,
-                         all_limits:     dict) -> tuple:
+                         all_limits:     dict,
+                         sensor:         'RFTSensor' = None) -> tuple:
     """
     Execute a full position trajectory for one motor.
-    Checks ESC at the top of every iteration — maximum response
-    latency is one LOOP_DT (10 ms at 100 Hz).
+    Records position, torque, and F/T sensor data each loop iteration.
 
-    Returns
-    -------
-    (positions, velocities, log)
-    log contains time, position, desired, error, torque arrays
-    and aborted flag if ESC was pressed mid-trajectory.
+    F/T sensor note:
+        The sensor runs at FT_RATE_HZ (200 Hz) independently of the
+        100 Hz control loop. Each loop iteration drains all new F/T
+        samples and records their mean to align with the control timestamp.
+        This gives one averaged F/T reading per control step.
     """
     n_steps          = len(trajectory_q)
     current_phase    = 0
     last_status_time = 0.0
     start_time       = time.time()
 
-    # Preallocate recording arrays
+    # ── Preallocate control loop recording arrays ──────────────────────────────
     log_time     = np.zeros(n_steps)
     log_q_actual = np.zeros(n_steps)
     log_q_des    = np.zeros(n_steps)
@@ -599,11 +664,15 @@ def run_motor_trajectory(mod: 'Mod',
     log_torque   = np.zeros(n_steps)
     phase_times  = []
 
+    # ── Preallocate F/T recording arrays — one row per control step ───────────
+    # Columns: [Fx, Fy, Fz, Tx, Ty, Tz]  (N and N·m, tare-corrected)
+    log_ft = np.zeros((n_steps, 6))     # F/T data aligned to control steps
+
     print(
         f"\n{'═'*65}\n"
         f"  MOTOR {motor_id} — {MOTOR_LABELS[motor_id]}\n"
         f"  Total steps : {n_steps}  ({n_steps * LOOP_DT:.1f} s)\n"
-        f"  Trajectory  : home → lower → upper → home\n"
+        f"  F/T sensor  : {'ACTIVE' if sensor else 'NOT CONNECTED'}\n"
         f"{'═'*65}"
     )
 
@@ -620,18 +689,16 @@ def run_motor_trajectory(mod: 'Mod',
         step_start = time.time()
         elapsed    = step_start - start_time
 
-        #   Check ESC at the top of every iteration
-        # Maximum response latency = one LOOP_DT (10 ms at 100 Hz)
+        # ── ESC check ─────────────────────────────────────────────────────────
         if is_estop():
             handle_estop(mod)
-
-            #   Save partial log so plotting still works on abort
             log = {
                 'time_s'      : log_time[:step],
                 'q_actual'    : log_q_actual[:step],
                 'q_desired'   : log_q_des[:step],
                 'q_error'     : log_q_error[:step],
                 'torque'      : log_torque[:step],
+                'ft'          : log_ft[:step],          
                 'phase_times' : phase_times,
                 'motor_id'    : motor_id,
                 'label'       : MOTOR_LABELS[motor_id],
@@ -643,7 +710,7 @@ def run_motor_trajectory(mod: 'Mod',
                 f"at step {step}/{n_steps} (t={elapsed:.2f}s)."
             )
 
-        # Phase tracking
+        # ── Phase tracking ────────────────────────────────────────────────────
         for p_idx in range(len(phase_indices) - 1, -1, -1):
             if step >= phase_indices[p_idx]:
                 if p_idx != current_phase:
@@ -663,28 +730,40 @@ def run_motor_trajectory(mod: 'Mod',
                 f"(step 0/{n_steps}  t=0.00s)"
             )
 
-        # Read current state
+        # ── Read motor state ──────────────────────────────────────────────────
         positions  = read_all_positions(mod, positions)
         velocities = read_all_velocities(mod, velocities)
 
-        # Trajectory setpoints for this step
+        # ── Drain all new F/T samples and average them ──────────────────────
+        # The sensor produces FT_RATE_HZ / LOOP_HZ ≈ 2 samples per loop step.
+        # Averaging gives one aligned, noise-reduced reading per control step.
+        if sensor is not None:
+            ft_batch = sensor.drain()
+            if ft_batch:
+                ft_raw  = np.array([s.ft for s in ft_batch])
+                ft_mean = ft_raw.mean(axis=0) - sensor.tare_offset
+            else:
+                # No new samples this step — carry forward last reading
+                ft_mean = log_ft[step - 1] if step > 0 else np.zeros(6)
+            log_ft[step] = ft_mean
+        else:
+            log_ft[step] = np.zeros(6)
+
+        # ── Compute and send torque ───────────────────────────────────────────
         qd_step   = trajectory_q[step]
         dqd_step  = trajectory_dq[step]
         ddqd_step = trajectory_ddq[step]
 
-        # Compute torque via PD + inverse dynamics
         torque_cmds = compute_single_motor_torque(
             motor_id, positions, velocities,
             qd_step, dqd_step, ddqd_step,
             all_limits
         )
-
-        # Send all motors via GroupSyncWrite
         mod.send_torque_cmd([
             to_unsigned_16(torque_cmds[mid]) for mid in ALL_IDS
         ])
 
-        # Record data
+        # ── Record motor data ─────────────────────────────────────────────────
         pos_actual         = positions[motor_id]
         error              = qd_step - pos_actual
         log_time[step]     = elapsed
@@ -693,49 +772,42 @@ def run_motor_trajectory(mod: 'Mod',
         log_q_error[step]  = rad_to_deg(error)
         log_torque[step]   = torque_cmds[motor_id]
 
-        # Periodic status print
+        # ── Periodic status print ─────────────────────────────────────────────
         now = time.time()
         if now - last_status_time >= STATUS_INTERVAL:
-            pct_done = 100.0 * step / max(n_steps - 1, 1)
+            pct = 100.0 * step / max(n_steps - 1, 1)
+            ft  = log_ft[step]
             print(
-                f"    step {step:>4}/{n_steps}  "
-                f"({pct_done:>5.1f}%)  "
-                f"t={elapsed:>5.1f}s  |  "
-                f"q={rad_to_deg(pos_actual):>8.2f}°  "
-                f"qd={rad_to_deg(qd_step):>8.2f}°  "
-                f"err={rad_to_deg(error):>+7.2f}°  "
-                f"I={torque_cmds[motor_id]:>5} steps"
+                f"    step {step:>4}/{n_steps} ({pct:>5.1f}%) "
+                f"t={elapsed:>5.1f}s | "
+                f"q={rad_to_deg(pos_actual):>8.2f}° "
+                f"err={rad_to_deg(error):>+7.2f}° "
+                f"I={torque_cmds[motor_id]:>4} | "
+                #f"Fz={ft[2]:>+6.2f}N "
+                #f"Tz={ft[5]:>+6.3f}N·m"
             )
             last_status_time = now
 
-        # Pace loop
+        # ── Pace loop ─────────────────────────────────────────────────────────
         elapsed_step = time.time() - step_start
         sleep_t      = LOOP_DT - elapsed_step
         if sleep_t > 0:
             time.sleep(sleep_t)
 
-    # Zero this motor after trajectory completes
     mod.send_torque_cmd([HOLD_CURRENT] * N_MOTORS)
     total_time = time.time() - start_time
-
     print(
-        f"\n  [COMPLETE] Motor {motor_id} trajectory done. "
+        f"\n  [COMPLETE] Motor {motor_id} done. "
         f"Total time: {total_time:.2f} s"
     )
-    print(
-        f"  Final position : {rad_to_deg(positions[motor_id]):.2f}°  "
-        f"Home           : {rad_to_deg(all_limits[motor_id]['home']):.2f}°  "
-        f"Final error    : "
-        f"{rad_to_deg(positions[motor_id] - all_limits[motor_id]['home']):+.2f}°"
-    )
 
-    # Pack full log
     log = {
         'time_s'      : log_time,
         'q_actual'    : log_q_actual,
         'q_desired'   : log_q_des,
         'q_error'     : log_q_error,
         'torque'      : log_torque,
+        'ft'          : log_ft,             
         'phase_times' : phase_times,
         'motor_id'    : motor_id,
         'label'       : MOTOR_LABELS[motor_id],
@@ -745,6 +817,293 @@ def run_motor_trajectory(mod: 'Mod',
 
     return positions, velocities, log
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SAVING RESULTS AS CSV
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_results_csv(all_logs: list) -> str:
+    """
+    Save all trajectory data for every motor into a single CSV file.
+
+    One row per control loop step per motor. Columns include:
+        - Run metadata  : motor_id, motor_label, phase, aborted
+        - Time          : time_s
+        - Position      : q_actual_deg, q_desired_deg, q_error_deg
+        - Current       : current_steps, current_mA
+        - F/T sensor    : Fx_N, Fy_N, Fz_N, Tx_Nm, Ty_Nm, Tz_Nm
+        - F/T magnitude : force_mag_N, torque_mag_Nm
+        - Gain settings : Kp, Kd
+
+    A second summary CSV is also written with per-motor statistics:
+        - RMS and peak values for position error, current, and F/T channels
+
+    Parameters
+    ----------
+    all_logs : list of log dicts from run_motor_trajectory()
+
+    Returns
+    -------
+    str — path to the main CSV file
+    """
+    import os
+    from datetime import datetime
+
+    if not all_logs:
+        print("[CSV] No data to save.")
+        return ""
+
+    # ── Build output folder and base filename ─────────────────────────────────
+    RESULTS_DIR = "flipper_results"
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"{timestamp}_flipper_trajectory_Kp{KP_VAL}_Kd{KD_VAL}"
+
+    main_csv_path    = os.path.join(RESULTS_DIR, f"{base_name}_data.csv")
+    summary_csv_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.csv")
+
+    # ── Phase lookup helper ───────────────────────────────────────────────────
+    def get_phase_label(step: int, phase_indices: list) -> str:
+        """Return the phase label for a given step index."""
+        current_phase = 0
+        for p_idx in range(len(phase_indices) - 1, -1, -1):
+            if step >= phase_indices[p_idx]:
+                current_phase = p_idx
+                break
+        return PHASE_LABELS[current_phase] if current_phase < len(PHASE_LABELS) else "unknown"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  MAIN DATA CSV — one row per step per motor
+    # ══════════════════════════════════════════════════════════════════════════
+    main_headers = [
+        # ── Run metadata ──────────────────────────────────────────────────────
+        "motor_id",
+        "motor_label",
+        "Kp_Nm_per_rad",
+        "Kd_Nm_s_per_rad",
+        "aborted",
+        "phase",
+
+        # ── Time ──────────────────────────────────────────────────────────────
+        "time_s",
+
+        # ── Position ──────────────────────────────────────────────────────────
+        "q_actual_deg",
+        "q_desired_deg",
+        "q_error_deg",
+
+        # ── Commanded current ─────────────────────────────────────────────────
+        "current_steps",
+        "current_mA",
+
+        # ── F/T sensor — individual channels ─────────────────────────────────
+        "Fx_N",
+        "Fy_N",
+        "Fz_N",
+        "Tx_Nm",
+        "Ty_Nm",
+        "Tz_Nm",
+
+        # ── F/T sensor — resultant magnitudes ─────────────────────────────────
+        "force_mag_N",
+        "torque_mag_Nm",
+    ]
+
+    total_rows = 0
+
+    with open(main_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(main_headers)
+
+        for log in all_logs:
+            mid          = log['motor_id']
+            label        = log['label']
+            aborted      = log.get('aborted', False)
+            phase_idx    = log.get('phase_times', [])
+            t            = log['time_s']
+            q_act        = log['q_actual']
+            q_des        = log['q_desired']
+            q_err        = log['q_error']
+            torque_steps = log['torque']
+            ft_data      = log.get('ft', np.zeros((len(t), 6)))
+
+            # ── Ensure ft_data is the right shape ─────────────────────────────
+            if ft_data is None or ft_data.ndim != 2 or ft_data.shape[1] != 6:
+                ft_data = np.zeros((len(t), 6))
+
+            n_steps = len(t)
+
+            for step in range(n_steps):
+                # Current in mA
+                current_mA_val = torque_steps[step] * CURRENT_UNIT_MA
+
+                # F/T channels
+                fx  = ft_data[step, 0]
+                fy  = ft_data[step, 1]
+                fz  = ft_data[step, 2]
+                tx  = ft_data[step, 3]
+                ty  = ft_data[step, 4]
+                tz  = ft_data[step, 5]
+
+                # Resultant magnitudes
+                force_mag  = math.sqrt(fx**2 + fy**2 + fz**2)
+                torque_mag = math.sqrt(tx**2 + ty**2 + tz**2)
+
+                # Phase label for this step
+                phase_label = get_phase_label(step, phase_idx)
+
+                writer.writerow([
+                    # metadata
+                    mid,
+                    label,
+                    KP_VAL,
+                    KD_VAL,
+                    int(aborted),
+                    phase_label,
+
+                    # time
+                    f"{t[step]:.5f}",
+
+                    # position
+                    f"{q_act[step]:.4f}",
+                    f"{q_des[step]:.4f}",
+                    f"{q_err[step]:.4f}",
+
+                    # current
+                    f"{int(torque_steps[step])}",
+                    f"{current_mA_val:.4f}",
+
+                    # F/T channels
+                    f"{fx:.6f}",
+                    f"{fy:.6f}",
+                    f"{fz:.6f}",
+                    f"{tx:.6f}",
+                    f"{ty:.6f}",
+                    f"{tz:.6f}",
+
+                    # magnitudes
+                    f"{force_mag:.6f}",
+                    f"{torque_mag:.6f}",
+                ])
+
+                total_rows += 1
+
+    print(f"[CSV] Main data saved  : {main_csv_path}")
+    print(f"[CSV] Total rows       : {total_rows}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SUMMARY CSV — one row per motor with statistics
+    # ══════════════════════════════════════════════════════════════════════════
+    summary_headers = [
+        # ── Run metadata ──────────────────────────────────────────────────────
+        "motor_id",
+        "motor_label",
+        "Kp_Nm_per_rad",
+        "Kd_Nm_s_per_rad",
+        "aborted",
+        "n_steps",
+        "duration_s",
+
+        # ── Position error statistics ─────────────────────────────────────────
+        "pos_error_rms_deg",
+        "pos_error_peak_deg",
+        "pos_error_mean_deg",
+        "pos_final_error_deg",
+
+        # ── Current statistics ────────────────────────────────────────────────
+        "current_rms_mA",
+        "current_peak_mA",
+        "current_mean_abs_mA",
+
+        # ── F/T force statistics ──────────────────────────────────────────────
+        "Fx_rms_N",   "Fx_peak_N",
+        "Fy_rms_N",   "Fy_peak_N",
+        "Fz_rms_N",   "Fz_peak_N",
+        "force_mag_rms_N",
+        "force_mag_peak_N",
+
+        # ── F/T torque statistics ─────────────────────────────────────────────
+        "Tx_rms_Nm",  "Tx_peak_Nm",
+        "Ty_rms_Nm",  "Ty_peak_Nm",
+        "Tz_rms_Nm",  "Tz_peak_Nm",
+        "torque_mag_rms_Nm",
+        "torque_mag_peak_Nm",
+    ]
+
+    with open(summary_csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(summary_headers)
+
+        for log in all_logs:
+            mid          = log['motor_id']
+            label        = log['label']
+            aborted      = log.get('aborted', False)
+            t            = log['time_s']
+            q_err        = log['q_error']
+            torque_steps = log['torque']
+            ft_data      = log.get('ft', np.zeros((len(t), 6)))
+
+            if ft_data is None or ft_data.ndim != 2 or ft_data.shape[1] != 6:
+                ft_data = np.zeros((len(t), 6))
+
+            n_steps    = len(t)
+            duration_s = float(t[-1]) if n_steps > 0 else 0.0
+
+            # ── Position error statistics ─────────────────────────────────────
+            err_rms   = float(np.sqrt(np.mean(q_err**2))) if n_steps > 0 else 0.0
+            err_peak  = float(np.max(np.abs(q_err)))       if n_steps > 0 else 0.0
+            err_mean  = float(np.mean(np.abs(q_err)))      if n_steps > 0 else 0.0
+            err_final = float(q_err[-1])                   if n_steps > 0 else 0.0
+
+            # ── Current statistics ────────────────────────────────────────────
+            cur_mA      = torque_steps * CURRENT_UNIT_MA
+            cur_rms     = float(np.sqrt(np.mean(cur_mA**2))) if n_steps > 0 else 0.0
+            cur_peak    = float(np.max(np.abs(cur_mA)))       if n_steps > 0 else 0.0
+            cur_mean    = float(np.mean(np.abs(cur_mA)))      if n_steps > 0 else 0.0
+
+            # ── F/T channel statistics ────────────────────────────────────────
+            def rms(arr):  return float(np.sqrt(np.mean(arr**2))) if len(arr) > 0 else 0.0
+            def peak(arr): return float(np.max(np.abs(arr)))      if len(arr) > 0 else 0.0
+
+            force_mag  = np.linalg.norm(ft_data[:, :3], axis=1)
+            torque_mag = np.linalg.norm(ft_data[:, 3:], axis=1)
+
+            writer.writerow([
+                # metadata
+                mid,
+                label,
+                KP_VAL,
+                KD_VAL,
+                int(aborted),
+                n_steps,
+                f"{duration_s:.3f}",
+
+                # position error
+                f"{err_rms:.4f}",
+                f"{err_peak:.4f}",
+                f"{err_mean:.4f}",
+                f"{err_final:.4f}",
+
+                # current
+                f"{cur_rms:.4f}",
+                f"{cur_peak:.4f}",
+                f"{cur_mean:.4f}",
+
+                # F/T forces
+                f"{rms(ft_data[:,0]):.6f}",  f"{peak(ft_data[:,0]):.6f}",
+                f"{rms(ft_data[:,1]):.6f}",  f"{peak(ft_data[:,1]):.6f}",
+                f"{rms(ft_data[:,2]):.6f}",  f"{peak(ft_data[:,2]):.6f}",
+                f"{rms(force_mag):.6f}",     f"{peak(force_mag):.6f}",
+
+                # F/T torques
+                f"{rms(ft_data[:,3]):.6f}",  f"{peak(ft_data[:,3]):.6f}",
+                f"{rms(ft_data[:,4]):.6f}",  f"{peak(ft_data[:,4]):.6f}",
+                f"{rms(ft_data[:,5]):.6f}",  f"{peak(ft_data[:,5]):.6f}",
+                f"{rms(torque_mag):.6f}",    f"{peak(torque_mag):.6f}",
+            ])
+
+    print(f"[CSV] Summary saved    : {summary_csv_path}")
+    return main_csv_path
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PLOTTING
@@ -752,20 +1111,11 @@ def run_motor_trajectory(mod: 'Mod',
 
 def plot_results(all_logs: list) -> None:
     """
-    Plot position tracking, tracking error, and commanded current
-    for all motors after the trajectory program completes.
-
-    Layout (one row per motor, three columns):
-        Left   : actual vs desired position  (deg)  vs time (s)
-        Centre : position tracking error     (deg)  vs time (s)
-        Right  : commanded current           (mA)   vs time (s)
-
-    Current values are converted from register steps to mA:
-        I_mA = steps x CURRENT_UNIT_MA  (2.69 mA/step for XW540-T260)
-
-    Parameters
-    ----------
-    all_logs : list of log dicts returned by run_motor_trajectory()
+    Four-column plot per motor:
+        Col 1 : Position tracking     (deg)
+        Col 2 : Tracking error        (deg)
+        Col 3 : Commanded current     (mA)
+        Col 4 : F/T sensor data       (N and N·m)
     """
     import os
     from datetime import datetime
@@ -775,32 +1125,34 @@ def plot_results(all_logs: list) -> None:
         print("[PLOT] No data to plot.")
         return
 
-    # ── Figure layout — n_motors rows × 3 columns ─────────────────────────────
+    # ── 4 columns: position, error, current, F/T ──────────────────────────────
     fig, axes = plt.subplots(
-        n_motors, 3,
-        figsize=(18, 4 * n_motors),     # wider to accommodate 3 columns
+        n_motors, 5,
+        figsize=(26, 5 * n_motors),
         sharex='row'
     )
-
-    # Ensure axes is always 2D even for a single motor
     if n_motors == 1:
         axes = np.array([axes])
 
-    # ── Colour scheme — one colour per motor ──────────────────────────────────
     colours = {
-        MOTOR_ID_X: '#2196F3',      # blue
-        MOTOR_ID_Y: '#4CAF50',      # green
-        MOTOR_ID_Z: '#FF5722',      # orange-red
+        MOTOR_ID_X: '#2196F3',
+        MOTOR_ID_Y: '#4CAF50',
+        MOTOR_ID_Z: '#FF5722',
     }
 
+    # F/T channel colours
+    FT_COLOURS = {
+        'Fx': '#E53935', 'Fy': '#8E24AA', 'Fz': '#1565C0',
+        'Tx': '#F4511E', 'Ty': '#6D4C41', 'Tz': '#00838F',
+    }
+    FT_LABELS  = ['Fx', 'Fy', 'Fz', 'Tx', 'Ty', 'Tz']
+    FT_UNITS   = ['N',  'N',  'N',  'N·m','N·m','N·m']
+
     fig.suptitle(
-        "Sea Turtle Flipper — Trajectory Results\n"
-        f"Computed Torque + PD Control  |  "
-        f"Kp=(x={Kp[0][0]}, y={Kp[1][1]}, z={Kp[2][2]}) Nm/rad   Kd=(x={Kd[0][0]}, y={Kd[1][1]}, z={Kd[2][2]}) Nm·s/rad  |  "
-        f"Current unit: {CURRENT_UNIT_MA} mA/step",
-        fontsize=13,
-        fontweight='bold',
-        y=1.01
+        "Sea Turtle Flipper — Full Trajectory Results\n"
+        f"Kp={KP_VAL} Nm/rad   Kd={KD_VAL} Nm·s/rad   |   "
+        f"F/T Sensor: RFT60-HA01 @ {FT_RATE_HZ} Hz",
+        fontsize=12, fontweight='bold', y=1.01
     )
 
     for row, log in enumerate(all_logs):
@@ -811,243 +1163,197 @@ def plot_results(all_logs: list) -> None:
         q_act       = log['q_actual']
         q_des       = log['q_desired']
         q_err       = log['q_error']
+        current_mA  = log['torque'] * CURRENT_UNIT_MA
+        ft_data     = log.get('ft', np.zeros((len(t), 6)))  # (n,6)
         phase_times = log['phase_times']
         aborted     = log.get('aborted', False)
 
-        # Convert register steps → mA for display
-        # Preserves sign so direction of current is visible
-        current_mA  = log['torque'] * CURRENT_UNIT_MA
-
-        title_suffix = " [ABORTED — ESC]" if aborted else ""
+        title_suffix = " [ABORTED]" if aborted else ""
         title_colour = 'red' if aborted else 'black'
 
-        ax_pos = axes[row, 0]   # left   — position tracking
-        ax_err = axes[row, 1]   # centre — tracking error
-        ax_cur = axes[row, 2]   # right  — commanded current
+        ax_pos = axes[row, 0]
+        ax_err = axes[row, 1]
+        ax_cur = axes[row, 2]
+        ax_frc  = axes[row, 3]
+        ax_trq  = axes[row, 4]
+
+        # ── Helper: draw phase lines on any axis ──────────────────────────────
+        def draw_phase_lines(ax):
+            for p_idx, pt in enumerate(phase_times):
+                ax.axvline(x=pt, color='grey', linewidth=0.7,
+                           linestyle=':', zorder=1)
+            if aborted and len(t) > 0:
+                ax.axvline(x=t[-1], color='red', linewidth=1.5,
+                           linestyle='--', zorder=4)
 
         # ══════════════════════════════════════════════════════════════════════
-        #  LEFT SUBPLOT — Position Tracking
+        #  COL 1 — Position Tracking
         # ══════════════════════════════════════════════════════════════════════
-        ax_pos.plot(
-            t, q_des,
-            color='black', linewidth=1.5, linestyle='--',
-            label='Desired $q_d$', zorder=3
-        )
-        ax_pos.plot(
-            t, q_act,
-            color=colour, linewidth=1.5,
-            label='Actual $q$', zorder=2
-        )
-        ax_pos.fill_between(
-            t, q_des, q_act,
-            alpha=0.15, color=colour,
-            label='Tracking error region'
-        )
-
-        # Phase boundary vertical lines
-        for p_idx, pt in enumerate(phase_times):
-            ax_pos.axvline(
-                x=pt, color='grey', linewidth=0.8,
-                linestyle=':', zorder=1
-            )
-            ax_pos.text(
-                pt + 0.05, ax_pos.get_ylim()[0],
-                f'P{p_idx + 1}', fontsize=7,
-                color='grey', va='bottom'
-            )
-
-        # Home / lower / upper reference lines
-        if len(q_des) > 0:
-            home_deg  = q_des[0]
-            lower_deg = q_des.min()
-            upper_deg = q_des.max()
-            for val, lbl, ls in [
-                (home_deg,  'home',  '-'),
-                (lower_deg, 'lower', '--'),
-                (upper_deg, 'upper', '--'),
-            ]:
-                ax_pos.axhline(
-                    y=val, color='grey',
-                    linewidth=0.6, linestyle=ls, alpha=0.5
-                )
-                ax_pos.text(
-                    t[-1] if len(t) > 0 else 0, val,
-                    f' {lbl}\n {val:.1f}°',
-                    fontsize=7, color='grey', va='center'
-                )
-
-        # ESC abort annotation
-        if aborted and len(t) > 0:
-            ax_pos.axvline(
-                x=t[-1], color='red', linewidth=1.5,
-                linestyle='--', zorder=4
-            )
-            ax_pos.text(
-                t[-1], ax_pos.get_ylim()[1],
-                ' ESC STOP', fontsize=8,
-                color='red', va='top', fontweight='bold'
-            )
-
+        ax_pos.plot(t, q_des, 'k--', linewidth=1.5,
+                    label='Desired $q_d$', zorder=3)
+        ax_pos.plot(t, q_act, color=colour, linewidth=1.5,
+                    label='Actual $q$', zorder=2)
+        ax_pos.fill_between(t, q_des, q_act, alpha=0.15, color=colour)
+        draw_phase_lines(ax_pos)
         ax_pos.set_title(
-            f"Motor {mid} — {label}{title_suffix}\nPosition Tracking",
-            fontsize=10, fontweight='bold', color=title_colour
+            f"M{mid} — {label}{title_suffix}\nPosition Tracking",
+            fontsize=9, fontweight='bold', color=title_colour
         )
-        ax_pos.set_ylabel("Position (°)", fontsize=9)
-        ax_pos.legend(fontsize=8, loc='upper right')
-        ax_pos.grid(True, alpha=0.3)
-        ax_pos.set_xlim(left=0)
+        ax_pos.set_ylabel("Position (°)", fontsize=8)
+        ax_pos.legend(fontsize=7); ax_pos.grid(True, alpha=0.3)
 
         # ══════════════════════════════════════════════════════════════════════
-        #  CENTRE SUBPLOT — Tracking Error
+        #  COL 2 — Tracking Error
         # ══════════════════════════════════════════════════════════════════════
-        ax_err.plot(
-            t, q_err,
-            color=colour, linewidth=1.2,
-            label='Error $q_d - q$'
-        )
+        ax_err.plot(t, q_err, color=colour, linewidth=1.2,
+                    label='Error $q_d - q$')
         ax_err.fill_between(t, q_err, 0, alpha=0.15, color=colour)
-        ax_err.axhline(
-            y=0, color='black', linewidth=0.8,
-            linestyle='--', alpha=0.6
-        )
-
-        for pt in phase_times:
-            ax_err.axvline(
-                x=pt, color='grey', linewidth=0.8,
-                linestyle=':', zorder=1
-            )
-
-        if aborted and len(t) > 0:
-            ax_err.axvline(
-                x=t[-1], color='red', linewidth=1.5,
-                linestyle='--', zorder=4,
-                label='ESC stop'
-            )
-
+        ax_err.axhline(y=0, color='k', linewidth=0.8, linestyle='--', alpha=0.6)
+        draw_phase_lines(ax_err)
         if len(q_err) > 0:
-            rms_err  = float(np.sqrt(np.mean(q_err ** 2)))
-            peak_err = float(np.max(np.abs(q_err)))
             ax_err.text(
                 0.02, 0.95,
-                f"RMS  : {rms_err:.3f}°\nPeak : {peak_err:.3f}°",
-                transform=ax_err.transAxes,
-                fontsize=8, verticalalignment='top',
-                bbox=dict(
-                    boxstyle='round,pad=0.3',
-                    facecolor='white',
-                    edgecolor='grey',
-                    alpha=0.8
-                )
+                f"RMS : {np.sqrt(np.mean(q_err**2)):.3f}°\n"
+                f"Peak: {np.max(np.abs(q_err)):.3f}°",
+                transform=ax_err.transAxes, fontsize=7, va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='grey', alpha=0.8)
             )
-
         ax_err.set_title(
-            f"Motor {mid} — {label}{title_suffix}\nTracking Error ($q_d - q$)",
-            fontsize=10, fontweight='bold', color=title_colour
+            f"M{mid} — Tracking Error",
+            fontsize=9, fontweight='bold', color=title_colour
         )
-        ax_err.set_ylabel("Error (°)", fontsize=9)
-        ax_err.legend(fontsize=8, loc='upper right')
-        ax_err.grid(True, alpha=0.3)
-        ax_err.set_xlim(left=0)
+        ax_err.set_ylabel("Error (°)", fontsize=8)
+        ax_err.legend(fontsize=7); ax_err.grid(True, alpha=0.3)
 
         # ══════════════════════════════════════════════════════════════════════
-        #  RIGHT SUBPLOT — Commanded Current (mA)
+        #  COL 3 — Commanded Current
         # ══════════════════════════════════════════════════════════════════════
-        ax_cur.plot(
-            t, current_mA,
-            color=colour, linewidth=1.2,
-            label='Commanded current (mA)'
-        )
-        ax_cur.fill_between(
-            t, current_mA, 0,
-            alpha=0.15, color=colour
-        )
-
-        # Zero line — separates positive and negative current
-        ax_cur.axhline(
-            y=0, color='black', linewidth=0.8,
-            linestyle='--', alpha=0.6
-        )
-
-        # Hardware ceiling lines — shows when current is being clamped
-        ax_cur.axhline(
-            y=+CURRENT_CEILING_MA,
-            color='red', linewidth=0.8,
-            linestyle=':', alpha=0.7,
-            label=f'Ceiling ±{CURRENT_CEILING_MA} mA'
-        )
-        ax_cur.axhline(
-            y=-CURRENT_CEILING_MA,
-            color='red', linewidth=0.8,
-            linestyle=':', alpha=0.7
-        )
-
-        # Phase boundary vertical lines
-        for pt in phase_times:
-            ax_cur.axvline(
-                x=pt, color='grey', linewidth=0.8,
-                linestyle=':', zorder=1
-            )
-
-        # ESC abort annotation
-        if aborted and len(t) > 0:
-            ax_cur.axvline(
-                x=t[-1], color='red', linewidth=1.5,
-                linestyle='--', zorder=4,
-                label='ESC stop'
-            )
-
-        # Annotate peak and RMS current
+        ax_cur.plot(t, current_mA, color=colour, linewidth=1.2,
+                    label='Current (mA)')
+        ax_cur.fill_between(t, current_mA, 0, alpha=0.15, color=colour)
+        ax_cur.axhline(y=0, color='k', linewidth=0.8, linestyle='--', alpha=0.6)
+        ax_cur.axhline(y=+CURRENT_CEILING_MA, color='red', linewidth=0.8,
+                       linestyle=':', alpha=0.7, label=f'±{CURRENT_CEILING_MA}mA')
+        ax_cur.axhline(y=-CURRENT_CEILING_MA, color='red', linewidth=0.8,
+                       linestyle=':', alpha=0.7)
+        draw_phase_lines(ax_cur)
         if len(current_mA) > 0:
-            peak_cur = float(np.max(np.abs(current_mA)))
-            rms_cur  = float(np.sqrt(np.mean(current_mA ** 2)))
-            mean_cur = float(np.mean(np.abs(current_mA)))
             ax_cur.text(
                 0.02, 0.95,
-                f"Peak : {peak_cur:.1f} mA\n"
-                f"RMS  : {rms_cur:.1f} mA\n"
-                f"Mean : {mean_cur:.1f} mA",
-                transform=ax_cur.transAxes,
-                fontsize=8, verticalalignment='top',
-                bbox=dict(
-                    boxstyle='round,pad=0.3',
-                    facecolor='white',
-                    edgecolor='grey',
-                    alpha=0.8
+                f"Peak: {np.max(np.abs(current_mA)):.1f} mA\n"
+                f"RMS : {np.sqrt(np.mean(current_mA**2)):.1f} mA",
+                transform=ax_cur.transAxes, fontsize=7, va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='grey', alpha=0.8)
+            )
+        ax_cur.set_title(
+            f"M{mid} — Commanded Current",
+            fontsize=9, fontweight='bold', color=title_colour
+        )
+        ax_cur.set_ylabel("Current (mA)", fontsize=8)
+        ax_cur.legend(fontsize=7); ax_cur.grid(True, alpha=0.3)
+
+        # ══════════════════════════════════════════════════════════════════════
+        #  COL 4 — F/T Sensor (Force) / COL 5 — F/T Sensor (Torque)
+        # ══════════════════════════════════════════════════════════════════════
+        # Forces (Fx, Fy, Fz)
+        # Torques (Tx, Ty, Tz)
+
+        ft_has_data = ft_data is not None and ft_data.shape[0] > 0
+
+        if ft_has_data:
+            # ── Plot forces on left axis ──────────────────────────────────────
+            for i, ch in enumerate(['Fx', 'Fy', 'Fz']):
+                ax_frc.plot(
+                    t, ft_data[:, i],
+                    color=FT_COLOURS[ch], linewidth=1.0,
+                    label=f'{ch} (N)', linestyle='-'
                 )
+
+            for i, ch in enumerate(['Tx', 'Ty', 'Tz']):
+                ax_trq.plot(
+                    t, ft_data[:, i + 3],
+                    color=FT_COLOURS[ch], linewidth=1.2,
+                    linestyle='--',
+                    label=f'{ch} (N·m)'
+                )
+
+            # ── Phase lines ───────────────────────────────────────────────────
+            draw_phase_lines(ax_frc)
+            draw_phase_lines(ax_trq)
+
+            # ── Zero reference ────────────────────────────────────────────────
+            ax_frc.axhline(y=0, color='k', linewidth=0.6,
+                          linestyle='--', alpha=0.4)
+            ax_trq.axhline(y=0, color='k', linewidth=0.6,
+                          linestyle='--', alpha=0.4)
+
+            # ── Annotations: peak force and peak torque ───────────────────────
+            peak_f = float(np.max(np.abs(ft_data[:, :3])))
+            peak_t = float(np.max(np.abs(ft_data[:, 3:])))
+            rms_f  = float(np.sqrt(np.mean(ft_data[:, :3] ** 2)))
+            rms_t  = float(np.sqrt(np.mean(ft_data[:, 3:] ** 2)))
+            ax_frc.text(
+                0.02, 0.95,
+                f"Force  Peak: {peak_f:.2f} N\n"
+                f"Force  RMS : {rms_f:.2f} N\n"
+                f"Torque Peak: {peak_t:.4f} N·m\n"
+                f"Torque RMS : {rms_t:.4f} N·m",
+                transform=ax_frc.transAxes, fontsize=7, va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='grey', alpha=0.8)
+            )
+            ax_trq.text(
+                0.02, 0.95,
+                f"Torque Peak: {peak_t:.4f} N·m\n"
+                f"Torque RMS : {rms_t:.4f} N·m",
+                transform=ax_trq.transAxes, fontsize=7, va='top',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='grey', alpha=0.8)
+            )
+        else:
+            ax_frc.text(
+                0.5, 0.5, 'F/T sensor not connected',
+                transform=ax_frc.transAxes, ha='center', va='center',
+                fontsize=9, color='grey'
+            )
+            ax_trq.text(
+                0.5, 0.5, 'F/T sensor not connected',
+                transform=ax_trq.transAxes, ha='center', va='center',
+                fontsize=9, color='grey'
             )
 
-        ax_cur.set_title(
-            f"Motor {mid} — {label}{title_suffix}\n"
-            f"Commanded Current  ({CURRENT_UNIT_MA} mA/step)",
-            fontsize=10, fontweight='bold', color=title_colour
-        )
-        ax_cur.set_ylabel("Current (mA)", fontsize=9)
-        ax_cur.legend(fontsize=8, loc='upper right')
-        ax_cur.grid(True, alpha=0.3)
-        ax_cur.set_xlim(left=0)
+        ax_frc.axhline(y=0, color='k', linewidth=0.6, linestyle='--', alpha=0.5)
+        ax_frc.set_ylabel("Force (N)", fontsize=8)
+        ax_frc.set_title(f"M{mid} — Forces at Base", fontsize=9, fontweight='bold')
+        ax_frc.legend(fontsize=7, loc='upper right')
+        ax_frc.grid(True, alpha=0.3)
+
+        ax_trq.axhline(y=0, color='k', linewidth=0.6, linestyle='--', alpha=0.5)
+        ax_trq.set_ylabel("Torque (N·m)", fontsize=8)
+        ax_trq.set_title(f"M{mid} — Torques at Base", fontsize=9, fontweight='bold')
+        ax_trq.legend(fontsize=7, loc='upper right')
+        ax_trq.grid(True, alpha=0.3)
 
         # ── X-axis labels on bottom row only ──────────────────────────────────
         if row == n_motors - 1:
-            ax_pos.set_xlabel("Time (s)", fontsize=9)
-            ax_err.set_xlabel("Time (s)", fontsize=9)
-            ax_cur.set_xlabel("Time (s)", fontsize=9)
+            for ax in (ax_pos, ax_err, ax_cur, ax_frc, ax_trq):
+                ax.set_xlabel("Time (s)", fontsize=8)
 
     plt.tight_layout()
 
-    # ── Build results folder and filename ─────────────────────────────────────
+    # ── Save ──────────────────────────────────────────────────────────────────
     RESULTS_DIR = "flipper_results"
     os.makedirs(RESULTS_DIR, exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename  = os.path.join(
         RESULTS_DIR,
-        f"flipper_trajectory_Kp(x={Kp[0][0]}_y={Kp[1][1]}_z={Kp[2][2]})_Kd(x={Kd[0][0]}_y={Kd[1][1]}_z={Kd[2][2]})_{timestamp}.png"
+        f"{timestamp}_flipper_trajectory_Kp{KP_VAL}_Kd{KD_VAL}.png"
     )
-
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     print(f"\n[PLOT] Figure saved to: {filename}")
     plt.show()
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN
@@ -1060,7 +1366,7 @@ def main():
     print(f"""
   Control Law:
     τ = C(q,q̇)q̇_d + M(q)q̈_d + G(q) + Kp(q_d-q) + Kd(q̇_d-q̇)
-    Kp=(x={Kp[0][0]}, y={Kp[1][1]}, z={Kp[2][2]}) Nm/rad   Kd=(x={Kd[0][0]}, y={Kd[1][1]}, z={Kd[2][2]}) Nm·s/rad
+    Kp=({KP_VAL}) Nm/rad   Kd=({KD_VAL}) Nm·s/rad
 
   Trajectory per motor:
     home ──► lower_limit ──► upper_limit ──► home
@@ -1078,6 +1384,14 @@ def main():
     # ── 2. Hardware setup ─────────────────────────────────────────────────────
     port, packet = init_port()
     mod          = init_mod(port, packet)
+
+    sensor = None
+    try:
+        sensor = init_ft_sensor()
+    except Exception as e:
+        print(f"[F/T SENSOR] WARNING — Could not connect: {e}")
+        print("[F/T SENSOR] Continuing WITHOUT sensor data.\n")
+
 
     all_logs      = []
     results       = {}
@@ -1142,6 +1456,7 @@ def main():
                 positions,
                 velocities,
                 limits,
+                sensor=sensor
             )
 
             all_logs.append(log)
@@ -1224,9 +1539,17 @@ def main():
     #   ALWAYS runs — guarantees hardware is safe regardless of exit path
     finally:
         teardown_estop()        # unregister ESC hotkey
+        if sensor is not None:
+            close_ft_sensor(sensor)
         shutdown(mod, port)     # zero currents, disable torque, close port
 
-    # ── 8. Plot whatever data was recorded ────────────────────────────────────
+    # ── 8. Save CSV data ──────────────────────────────────────────────────────
+    # Called after hardware shutdown — purely offline file write
+    if all_logs:
+        print("\n[CSV] Saving trajectory data ...")
+        csv_path = save_results_csv(all_logs)
+
+    # ── 9. Plot whatever data was recorded ────────────────────────────────────
     # Hardware is already shut down — plotting is purely offline.
     # Partial logs (aborted mid-trajectory) are annotated on the graph.
     if all_logs:
@@ -1234,7 +1557,6 @@ def main():
         plot_results(all_logs)
     else:
         print("[PLOT] No trajectory data recorded — nothing to plot.")
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":

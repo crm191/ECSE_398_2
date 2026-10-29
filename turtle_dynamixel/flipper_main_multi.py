@@ -51,7 +51,7 @@ ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [-2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
 
 # ── Position limits in RADIANS ────────────────────────────────────────────────
 # Mod.get_position() returns radians so all limits must match.
@@ -82,8 +82,8 @@ HOLD_CURRENT     = 0
 COMBINED_DEV_LIMIT = 6.0 * MAX_DELTA_RAD   # ≈ 0.5236 rad
 
 # ── Timing ────────────────────────────────────────────────────────────────────
-LOOP_HZ = 1000
-LOOP_DT = 1.0 / LOOP_HZ            # 2.0 ms per iteration
+LOOP_HZ = 100
+LOOP_DT = 1.0 / LOOP_HZ            # 10.0 ms per iteration
 
 # ── Homing ────────────────────────────────────────────────────────────────────
 HOME_NUDGE_VEL      = 20            # profile velocity during homing
@@ -465,6 +465,7 @@ def main():
     # ── 2.a Build dynamic limits from actual startup positions ─────────────────
     limits = init_dynamic_limits(mod)
 
+    '''
     # ── 2.b Home all motors to their startup positions ─────────────────────────────
     verify = input("Verify all motors can safely move to their home positions? (y/n): ")
     if verify.lower() != 'y':
@@ -475,6 +476,7 @@ def main():
         print("[OK] Motors verified to move safely to home positions. Continuing...\n") 
         positions = home_all_motors(mod, port, packet, limits)
         time.sleep(5)
+    '''
 
     # ── 3. State tracking ─────────────────────────────────────────────────────
     # positions : { motor_id: radians } — updated each loop via GroupSyncRead
