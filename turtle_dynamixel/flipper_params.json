@@ -1,0 +1,56 @@
+{
+    "_about": "Parameters of the model-based flipper controller (hardware_adapter/torque_control.py). See hardware_adapter/README.md.",
+
+    "backend": "closed_form",
+    "_backend": "closed_form (numpy only) or mujoco (needs `pip install mujoco` and the turtle_simulator repo; set model_path if turtle.xml is not at the default location)",
+    "mode": "pd_plus",
+    "_mode": "pd_plus, desired_ff or computed_torque. Kp/Kd are in Nm/rad and Nm s/rad for pd_plus and desired_ff, in 1/s^2 and 1/s for computed_torque.",
+    "medium": "air",
+    "_medium": "air or water",
+    "gravity": [0.0, 0.0, -9.81],
+    "_gravity": "Gravity in the shell frame of turtle.xml (x lateral, -y forward, z up). Change it if the rig holds the shoulder at an angle.",
+    "buoyancy_scale": 1.0,
+    "added_mass_scale": 1.0,
+    "kp": [5.0, 4.0, 5.0],
+    "kd": [0.3, 0.3, 0.4],
+    "_kp_kd": "Used when torque_control() is called with Kp=None / KD=None. Otherwise the gains passed in are used.",
+
+    "flippers": {
+        "left": {
+            "enabled": true,
+            "slots": [0, 1, 2],
+            "_slots": "Rows of the q / dq / tau vectors in torque_control() that belong to this flipper (motor IDs 1, 2, 3 in flipper_trajectory.py).",
+            "offset_rad": [-6.283185307179586, 6.283185307179586, 6.283185307179586],
+            "sign": [1, 1, 1],
+            "_calibrate": "offset_rad and sign are placeholders (the home positions of flipper_trajectory.py). Calibrate them as described in README.md before running in current mode.",
+            "quadratic_drag": null,
+            "_quadratic_drag": "Water only, closed_form backend: Nm s^2/rad^2 per joint. null uses the default fitted to MuJoCo's fluid model.",
+            "actuator": {
+                "kt": [2.4, 2.4, 2.4],
+                "current_unit_ma": 2.69,
+                "current_limit_ma": [300.0, 300.0, 300.0],
+                "armature": [0.005, 0.005, 0.005],
+                "viscous": [0.0, 0.0, 0.0],
+                "coulomb": [0.0, 0.0, 0.0],
+                "coulomb_velocity": 0.05,
+                "_actuator": "kt from the XW540-T260 datasheet stall point; armature is a rough estimate and friction is zero until identified with tools/fit_flipper_params.py."
+            }
+        },
+        "right": {
+            "enabled": false,
+            "slots": [3, 4, 5],
+            "offset_rad": [0.0, 0.0, 0.0],
+            "sign": [1, 1, 1],
+            "quadratic_drag": null,
+            "actuator": {
+                "kt": [2.4, 2.4, 2.4],
+                "current_unit_ma": 2.69,
+                "current_limit_ma": [300.0, 300.0, 300.0],
+                "armature": [0.005, 0.005, 0.005],
+                "viscous": [0.0, 0.0, 0.0],
+                "coulomb": [0.0, 0.0, 0.0],
+                "coulomb_velocity": 0.05
+            }
+        }
+    }
+}
