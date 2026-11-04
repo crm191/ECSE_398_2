@@ -131,7 +131,7 @@ N_DOF      = 6          # full system DOF — second flipper padded with zeros
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [(16/9)*math.pi, 1*math.pi, 2*math.pi]  
 
 # ── Unit conversions ──────────────────────────────────────────────────────────
 STEPS_TO_RAD = (2 * math.pi) / 4096
@@ -586,10 +586,12 @@ def compute_single_motor_torque(active_mid: int,
     dqd_vec[active_idx][0]     = dqd_active
     ddqd_vec[active_idx][0]    = ddqd_active
 
+    # Test zeroes for position tracking against gravity. Want to stay stable
+    zeroes6 = np.zeros((6,6))
     # Call torque controller
     try:
         tau_steps = torque_control(
-            q_vec, dq_vec, qd_vec, dqd_vec, ddqd_vec, Kp, Kd
+            q_vec, dq_vec, qd_vec, dqd_vec, ddqd_vec, zeroes6, zeroes6
         )
     except Exception as e:
         print(f"[ERROR] torque_control() failed: {e} — zeroing all currents.")

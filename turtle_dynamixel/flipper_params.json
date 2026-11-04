@@ -17,11 +17,11 @@
 
     "flippers": {
         "left": {
-            "enabled": true,
+            "enabled": false,
             "slots": [0, 1, 2],
             "_slots": "Rows of the q / dq / tau vectors in torque_control() that belong to this flipper (motor IDs 1, 2, 3 in flipper_trajectory.py).",
-            "offset_rad": [-6.283185307179586, 6.283185307179586, 6.283185307179586],
-            "sign": [1, 1, 1],
+            "offset_rad": [5.672320068981571, 3.141592653589793, 6.283185307179586],
+            "sign": [-1, -1, -1],
             "_calibrate": "offset_rad and sign are placeholders (the home positions of flipper_trajectory.py). Calibrate them as described in README.md before running in current mode.",
             "quadratic_drag": null,
             "_quadratic_drag": "Water only, closed_form backend: Nm s^2/rad^2 per joint. null uses the default fitted to MuJoCo's fluid model.",
@@ -37,10 +37,10 @@
             }
         },
         "right": {
-            "enabled": false,
+            "enabled": true,
             "slots": [3, 4, 5],
-            "offset_rad": [0.0, 0.0, 0.0],
-            "sign": [1, 1, 1],
+            "offset_rad": [5.672320068981571, 3.141592653589793, 6.283185307179586],
+            "sign": [-1, -1, -1],
             "quadratic_drag": null,
             "actuator": {
                 "kt": [2.4, 2.4, 2.4],

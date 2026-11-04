@@ -51,7 +51,7 @@ ALL_IDS     = [MOTOR_ID_X, MOTOR_ID_Y, MOTOR_ID_Z]
 
 # ── Home Positions in RADIANS ───────────────────────────────────────────────
 # Home positions are set at startup and used for soft limits and collision checks.
-HOME_POSITIONS_RAD = [2*math.pi, 2*math.pi, 2*math.pi]  # 360° for all three motors
+HOME_POSITIONS_RAD = [(16/9)*math.pi, 1*math.pi, 2*math.pi]  
 
 # ── Position limits in RADIANS ────────────────────────────────────────────────
 # Mod.get_position() returns radians so all limits must match.
