@@ -39,6 +39,7 @@ import csv
 import sys
 import time
 import math
+import json
 import threading
 import keyboard
 import numpy as np
@@ -138,7 +139,7 @@ STEPS_TO_RAD = (2 * math.pi) / 4096
 RAD_TO_STEPS = 4096 / (2 * math.pi)
 
 # ── Position limits (radians) ─────────────────────────────────────────────────
-MAX_DELTA_RAD      = 114 * 3 * STEPS_TO_RAD    # ±10° x 3 soft travel limit
+MAX_DELTA_RAD      = 114 * 2 * STEPS_TO_RAD    # ±10° x 2 soft travel limit
 RAMP_ZONE_RAD      =  50 * STEPS_TO_RAD    # deceleration band near limit
 HOME_THRESHOLD_RAD = DXL_MOVING_STATUS_THRESHOLD * STEPS_TO_RAD
 
@@ -151,7 +152,7 @@ HOLD_CURRENT       = 0
 
 # ── PD Controller gains ───────────────────────────────────────────────────────
 KP_VAL = 4        # proportional gain (Nm/rad)
-KD_VAL = 0.25        # derivative gain   (Nm·s/rad)
+KD_VAL = 0.3        # derivative gain   (Nm·s/rad)
 Kp = np.diag([KP_VAL] * N_DOF)
 Kd = np.diag([KD_VAL] * N_DOF)
 
@@ -184,6 +185,54 @@ PHASE_LABELS = [
     "lower limit -> upper limit",
     "upper limit -> home",
 ]
+
+# ════════════════════════════════════════════════════════════════════════════
+# FLIPPER PARAMETER LOADING
+# ════════════════════════════════════════════════════════════════════════════
+
+def load_flipper_params(path: str = "flipper_params.json") -> dict:
+    """
+    Load and validate flipper controller parameters from JSON file.
+    """
+    if not os.path.isfile(path):
+        print(f"[PARAMS] WARNING — {path} not found. Using hardcoded defaults.")
+        return None
+
+    with open(path, 'r', encoding='utf-8') as f:
+        raw = json.load(f)
+
+    for key in ('left', 'right'):
+        flipper = raw.get('flippers', {}).get(key, {})
+        if flipper.get('enabled', False):
+            act = flipper['actuator']
+            return {
+                'kp'              : np.array(raw['kp'],               dtype=float),
+                'kd'              : np.array(raw['kd'],               dtype=float),
+                'kt'              : np.array(act['kt'],               dtype=float),
+                'current_unit_ma' : float(act['current_unit_ma']),
+                'current_limit_ma': np.array(act['current_limit_ma'], dtype=float),
+                'offset_rad'      : np.array(flipper['offset_rad'],   dtype=float),
+                'sign'            : np.array(flipper['sign'],         dtype=float),
+                'slots'           : list(flipper['slots']),           
+                'flipper_key'     : key,
+                'medium'          : raw.get('medium', 'air'),
+                'gravity'         : np.array(raw.get('gravity',
+                                    [0.0, 0.0, -9.81]),               dtype=float),
+            }
+    print("[PARAMS] WARNING — No enabled flipper found in JSON.")
+    return None
+
+# ── Model Parameters ─────────────────────────────────────────────────────────
+_params = load_flipper_params("flipper_params.json")
+
+# Left flipper  → slots [0, 1, 2]
+# Right flipper → slots [3, 4, 5]
+if _params is not None:
+    MOTOR_SLOTS = list(_params['slots'])
+    print(f"[PARAMS] Active flipper slots: {MOTOR_SLOTS}")
+else:
+    MOTOR_SLOTS = [3, 4, 5]    # default to right flipper
+    print("[PARAMS] No JSON found — defaulting to right flipper slots [3,4,5]")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPER FUNCTIONS
@@ -222,8 +271,9 @@ def build_state_vector(values: list) -> np.ndarray:
     Indices 3-5 (second flipper) are padded with zeros.
     """
     vec = np.zeros((N_DOF, 1))
-    for i, v in enumerate(values):
-        vec[i][0] = v
+    for slot_idx, v in zip(MOTOR_SLOTS, values):
+        # Place each motor value at its correct slot position
+        vec[slot_idx][0] = v
     return vec
 
 
@@ -241,7 +291,6 @@ def ramp_factor(pos: float, motor_lims: dict, direction: int) -> float:
     if dist >= RAMP_ZONE_RAD:
         return 1.0
     return dist / RAMP_ZONE_RAD
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TRAJECTORY GENERATION
@@ -568,6 +617,7 @@ def compute_single_motor_torque(active_mid: int,
     { motor_id: signed int steps }
     """
     active_idx = ALL_IDS.index(active_mid)
+    active_slot = MOTOR_SLOTS[active_idx]
 
     # Inactive motors track their current position -> zero tracking error
     qd_list = [
@@ -583,15 +633,15 @@ def compute_single_motor_torque(active_mid: int,
     # Feedforward velocity and acceleration — active motor only
     dqd_vec                    = np.zeros((N_DOF, 1))
     ddqd_vec                   = np.zeros((N_DOF, 1))
-    dqd_vec[active_idx][0]     = dqd_active
-    ddqd_vec[active_idx][0]    = ddqd_active
+    dqd_vec[active_slot][0]     = dqd_active
+    ddqd_vec[active_slot][0]    = ddqd_active
 
     # Test zeroes for position tracking against gravity. Want to stay stable
     zeroes6 = np.zeros((6,6))
     # Call torque controller
     try:
         tau_steps = torque_control(
-            q_vec, dq_vec, qd_vec, dqd_vec, ddqd_vec, zeroes6, zeroes6
+            q_vec, dq_vec, qd_vec, dqd_vec, ddqd_vec, Kp=None, KD=None
         )
     except Exception as e:
         print(f"[ERROR] torque_control() failed: {e} — zeroing all currents.")
@@ -606,7 +656,8 @@ def compute_single_motor_torque(active_mid: int,
             torque_cmds[mid] = 0
             continue
 
-        raw        = int(tau_steps[i][0])
+        slot      = MOTOR_SLOTS[i]
+        raw        = int(tau_steps[slot][0])
         direction  = +1 if raw >= 0 else -1
         pos        = positions[mid]
         motor_lims = all_limits[mid]
